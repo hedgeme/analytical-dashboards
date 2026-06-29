@@ -10,15 +10,15 @@ User=tecviva
 Group=tecviva
 WorkingDirectory=/home/tecviva/analytical-dashboards/dashboard
 EnvironmentFile=/home/tecviva/analytical-dashboards/dashboard/.env
+Environment=PYTHONPATH=/home/tecviva/analytical-dashboards/dashboard
+Environment=PATH=/home/tecviva/analytical-dashboards/dashboard/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 ExecStart=/home/tecviva/analytical-dashboards/dashboard/venv/bin/python app.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=eth-dashboard
-
-# Prevent the service from being killed on high memory
-OOMScoreAdjust=-100
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
