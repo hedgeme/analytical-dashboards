@@ -165,8 +165,9 @@ async def cmd_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Resistance: {res_str}\n"
             f"\n"
             f"Gas:     {gas.get('safe','N/A')} / {gas.get('fast','N/A')} gwei\n"
-            f"Funding: {der.get('funding_rate','N/A')}\n"
+            f"Funding: {der.get('funding_rate','N/A')}%\n"
             f"L/S:     {der.get('long_short_ratio','N/A')}\n"
+            f"OI:      ${der.get('open_interest_usd', 0)/1e9:.2f}B\n" if der.get('open_interest_usd') else f"OI:      N/A\n"
         )
 
         await msg.delete()

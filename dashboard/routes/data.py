@@ -153,26 +153,27 @@ async def fetch_cq(s, path: str, params: dict = None):
                      params={"window": "day", "limit": "3", **(params or {})})
 
 
-# ── Binance Futures public API (no key — replaces CryptoQuant derivatives) ───
+# ── OKX public API (no key — replaces CryptoQuant derivatives) ───────────────
+# Binance is geo-restricted on this server; OKX is accessible.
 
-BNB_FUTURES = "https://fapi.binance.com"
+OKX_BASE = "https://www.okx.com/api/v5"
 
 async def fetch_funding_rate(s):
-    """ETH funding rate from Binance Futures — free, no key."""
-    return await get(s, f"{BNB_FUTURES}/fapi/v1/premiumIndex",
-                     params={"symbol": "ETHUSDT"})
+    """ETH-USDT-SWAP funding rate from OKX — free, no key."""
+    return await get(s, f"{OKX_BASE}/public/funding-rate",
+                     params={"instId": "ETH-USDT-SWAP"})
 
 
 async def fetch_open_interest(s):
-    """ETH open interest from Binance Futures — free, no key."""
-    return await get(s, f"{BNB_FUTURES}/fapi/v1/openInterest",
-                     params={"symbol": "ETHUSDT"})
+    """ETH-USDT-SWAP open interest from OKX — free, no key."""
+    return await get(s, f"{OKX_BASE}/public/open-interest",
+                     params={"instId": "ETH-USDT-SWAP"})
 
 
 async def fetch_long_short_ratio(s):
-    """Global long/short account ratio from Binance Futures — free, no key."""
-    return await get(s, f"{BNB_FUTURES}/futures/data/globalLongShortAccountRatio",
-                     params={"symbol": "ETHUSDT", "period": "1h", "limit": "1"})
+    """ETH long/short account ratio from OKX — free, no key."""
+    return await get(s, f"{OKX_BASE}/rubik/stat/contracts/long-short-account-ratio-contract",
+                     params={"instId": "ETH-USDT-SWAP", "period": "1H"})
 
 
 async def fetch_sosovalue_etf(s):
@@ -255,31 +256,31 @@ async def fetch_all_data() -> Dict:
     fng_7d      = [d.get("value") for d in (_safe_get(fng, "data") or [])]
     eth_fng_val = _safe_get(eth_fng, "value")
 
-    # ── parse Binance Futures derivatives ─────────────────────────────────────
-    # cq_funding → now Binance premiumIndex: {"lastFundingRate": "0.0001"}
-    # cq_oi      → now Binance openInterest: {"openInterest": "123456.78"}
-    # cq_ls      → now Binance ratio list:   [{"longShortRatio": "1.23"}]
-    bnb_funding = None
-    bnb_oi      = None
-    bnb_ls      = None
+    # ── parse OKX derivatives ─────────────────────────────────────────────────
+    # cq_funding → OKX funding-rate:  {"data": [{"fundingRate": "-0.000029"}]}
+    # cq_oi      → OKX open-interest: {"data": [{"oi": "7464177", "oiUsd": "1173741988"}]}
+    # cq_ls      → OKX LS ratio:      {"data": [["timestamp", "2.941"]]}
+    okx_funding = None
+    okx_oi_usd  = None
+    okx_ls      = None
     try:
-        bnb_funding = float(cq_funding.get("lastFundingRate", 0)) * 100 if cq_funding else None
+        okx_funding = float(cq_funding["data"][0]["fundingRate"]) * 100 if cq_funding else None
     except Exception: pass
     try:
-        bnb_oi = float(cq_oi.get("openInterest", 0)) if cq_oi else None
+        okx_oi_usd = float(cq_oi["data"][0]["oiUsd"]) if cq_oi else None
     except Exception: pass
     try:
-        bnb_ls = float(cq_ls[0].get("longShortRatio", 0)) if cq_ls and isinstance(cq_ls, list) else None
+        okx_ls = float(cq_ls["data"][0][1]) if cq_ls else None
     except Exception: pass
 
     cq_data = {
-        "exchange_inflow":    _cq_last(cq_flows, "inflow_mean"),  # None on Basic plan
-        "funding_rate":       round(bnb_funding, 4) if bnb_funding is not None else None,
-        "open_interest":      round(bnb_oi, 0) if bnb_oi is not None else None,
-        "long_short_ratio":   round(bnb_ls, 3) if bnb_ls is not None else None,
-        "liquidations_long":  _cq_last(cq_liq, "liquidations_long"),   # None on Basic plan
-        "liquidations_short": _cq_last(cq_liq, "liquidations_short"),  # None on Basic plan
-        "source": "Binance Futures (funding/OI/LS) + CryptoQuant Basic",
+        "exchange_inflow":    _cq_last(cq_flows, "inflow_mean"),  # None on CryptoQuant Basic
+        "funding_rate":       round(okx_funding, 4) if okx_funding is not None else None,
+        "open_interest_usd":  round(okx_oi_usd, 0) if okx_oi_usd is not None else None,
+        "long_short_ratio":   round(okx_ls, 3) if okx_ls is not None else None,
+        "liquidations_long":  _cq_last(cq_liq, "liquidations_long"),
+        "liquidations_short": _cq_last(cq_liq, "liquidations_short"),
+        "source": "OKX (funding/OI/LS)",
     }
 
     # ── parse staking (DefiLlama) ─────────────────────────────────────────────
