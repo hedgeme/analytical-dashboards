@@ -430,9 +430,21 @@ def _safe_get(obj, *keys):
     return obj
 
 
+# ─── 5-minute TTL cache ───────────────────────────────────────────────────────
+
+_data_cache: dict = {}
+DATA_CACHE_TTL = 5 * 60  # seconds
+
+
 # ─── Flask route ──────────────────────────────────────────────────────────────
 
 @data_bp.route("/data")
 def get_data():
+    now = time.time()
+    if _data_cache.get("ts") and (now - _data_cache["ts"]) < DATA_CACHE_TTL:
+        print("[data] serving from cache")
+        return jsonify(_data_cache["data"])
     result = asyncio.run(fetch_all_data())
+    _data_cache["ts"]   = now
+    _data_cache["data"] = result
     return jsonify(result)

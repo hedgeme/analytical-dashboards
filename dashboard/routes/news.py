@@ -4,12 +4,14 @@ Runs two Anthropic web searches in parallel:
   1. Macro economics headlines (Fed, CPI, DXY, Nasdaq, PCE)
   2. Crypto / ETH headlines (ETF flows, hacks, regulatory, protocol)
 Returns top 3 macro + top 3 crypto headlines with impact tags.
-Cost: ~2 web-search tool uses on claude-sonnet-4-6 (~$0.006)
+Cost: ~2 web-search tool uses on claude-haiku-4-5-20251001 (~$0.001)
+Cache: 30-minute TTL to prevent duplicate API calls on rapid retries.
 """
 
 import os
+import re
 import json
-import asyncio
+import time
 import concurrent.futures
 from flask import Blueprint, jsonify
 
@@ -17,7 +19,7 @@ import anthropic
 
 news_bp = Blueprint("news", __name__)
 
-MODEL   = "claude-sonnet-4-6"
+MODEL   = "claude-haiku-4-5-20251001"
 MAX_TOK = 1024
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
@@ -56,6 +58,17 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
 }"""
 
 
+def _extract_json(text: str) -> dict:
+    """Robustly extract the first complete {...} object from arbitrary text."""
+    text = text.strip()
+    # Find the first '{' and last '}' in the string
+    start = text.find("{")
+    end   = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError(f"No JSON object found in: {text[:200]!r}")
+    return json.loads(text[start:end + 1])
+
+
 def _search(prompt: str, label: str) -> dict:
     """Run a single web-search-enabled Anthropic call (blocking)."""
     try:
@@ -65,23 +78,36 @@ def _search(prompt: str, label: str) -> dict:
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt}],
         )
-        # Extract text from the final assistant turn
         text = ""
         for block in resp.content:
             if hasattr(block, "text"):
                 text += block.text
 
-        # Strip markdown code fences if present
-        text = text.strip()
-        if text.startswith("```"):
-            text = text[text.find("{"):text.rfind("}") + 1]
-
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {"headlines": [], "raw": text if "text" in dir() else ""}
+        return _extract_json(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[news] {label} JSON parse error: {e}")
+        return {"headlines": [], "error": str(e)}
     except Exception as e:
         print(f"[news] {label} search error: {e}")
         return {"headlines": [], "error": str(e)}
+
+
+# ─── 30-minute TTL cache ───────────────────────────────────────────────────────
+
+_cache: dict = {}
+CACHE_TTL = 30 * 60  # seconds
+
+
+def _cached_fetch() -> dict:
+    now = time.time()
+    if _cache.get("ts") and (now - _cache["ts"]) < CACHE_TTL:
+        print("[news] serving from cache")
+        return _cache["data"]
+
+    data = fetch_news()
+    _cache["ts"]   = now
+    _cache["data"] = data
+    return data
 
 
 def fetch_news() -> dict:
@@ -100,4 +126,4 @@ def fetch_news() -> dict:
 
 @news_bp.route("/news")
 def get_news():
-    return jsonify(fetch_news())
+    return jsonify(_cached_fetch())
