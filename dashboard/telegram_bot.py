@@ -28,6 +28,16 @@ PIDFILE = "/tmp/eth-dashboard-bot.pid"
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
+def _md(text: str) -> str:
+    """Escape characters that break Telegram MarkdownV1 parser."""
+    if not text:
+        return ""
+    # [ ] cause false link detection; _ * ` are formatting chars
+    for ch in ["[", "]", "_", "*", "`"]:
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 def _fmt_price(v) -> str:
     if v is None: return "N/A"
     return f"${float(v):,.2f}"
@@ -183,19 +193,25 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["📰 *Market News*\n"]
 
         lines.append("*Macro:*")
-        for h in d.get("macro", []):
+        macro = d.get("macro", [])
+        if not macro:
+            lines.append("No macro events retrieved.")
+        for h in macro:
             tag = {"BEARISH": "🔴", "BULLISH": "🟢", "NEUTRAL": "⚪"}.get(h.get("impact",""), "•")
-            lines.append(f"{tag} {h.get('title','')}")
+            lines.append(f"{tag} {_md(h.get('title',''))}")
             if h.get("detail"):
-                lines.append(f"   _{h['detail']}_")
+                lines.append(f"   {_md(h['detail'])}")
 
         lines.append("\n*Crypto / X:*")
-        for h in d.get("crypto", []):
+        crypto = d.get("crypto", [])
+        if not crypto:
+            lines.append("No crypto events retrieved.")
+        for h in crypto:
             tag = {"BEARISH": "🔴", "BULLISH": "🟢", "NEUTRAL": "⚪"}.get(h.get("impact",""), "•")
-            src = f" `{h['source']}`" if h.get("source") else ""
-            lines.append(f"{tag}{src} {h.get('title','')}")
+            src  = f" ({h['source']})" if h.get("source") else ""
+            lines.append(f"{tag}{_md(src)} {_md(h.get('title',''))}")
             if h.get("detail"):
-                lines.append(f"   _{h['detail']}_")
+                lines.append(f"   {_md(h['detail'])}")
 
         await msg.delete()
         await _post(context, update, "\n".join(lines))
@@ -243,18 +259,18 @@ async def cmd_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"│ Entry:  {zone(A.get('entry_zone'))}\n"
             f"│ Target: {_fmt_price(A.get('target1'))} → {_fmt_price(A.get('target2'))}\n"
             f"│ Stop:   {_fmt_price(A.get('stop'))}\n"
-            f"│ _{A.get('thesis','')}_\n"
-            f"│ Risks: {', '.join(A.get('risks', []))}\n"
+            f"│ {_md(A.get('thesis',''))}\n"
+            f"│ Risks: {_md(', '.join(A.get('risks', [])))}\n"
             f"\n"
             f"┌─ 🅑 *Option B — {B.get('direction','?')} {B.get('confidence','?')}% (contrarian)*\n"
-            f"│ Only if: {B.get('entry_condition','')}\n"
+            f"│ Only if: {_md(B.get('entry_condition',''))}\n"
             f"│ Entry: {zone(B.get('entry_zone'))}  Stop: {_fmt_price(B.get('stop'))}\n"
-            f"│ _{B.get('thesis','')}_\n"
+            f"│ {_md(B.get('thesis',''))}\n"
             f"\n"
             f"┌─ 🅒 *Option C — WAIT*\n"
-            f"│ {C.get('reason','')}\n"
-            f"│ → A: {C.get('watch_for_A','')}\n"
-            f"│ → B: {C.get('watch_for_B','')}\n"
+            f"│ {_md(C.get('reason',''))}\n"
+            f"│ → A: {_md(C.get('watch_for_A',''))}\n"
+            f"│ → B: {_md(C.get('watch_for_B',''))}\n"
             f"\n"
             f"*Ranked:*\n"
         )
