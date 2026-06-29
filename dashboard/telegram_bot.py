@@ -2,18 +2,16 @@
 ETH Dashboard Telegram Bot
 Commands: /dashboard /data /news /analysis /status /help
 
-Can run as:
-  1. Background thread from app.py (when TELEGRAM_BOT_TOKEN is set)
-  2. Standalone: python telegram_bot.py
-
-Calls Flask API endpoints at localhost:5001 so all logic stays in one place.
+Pattern (same as TecBot):
+  - You DM the bot a command
+  - Bot posts the full result to DASHBOARD_CHANNEL_ID
+  - Bot acks in your DM: "✅ Posted to channel"
+  - If DASHBOARD_CHANNEL_ID is not set, result goes directly to DM
 """
 
-import asyncio
-import json
 import os
+import json
 import httpx
-
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -22,51 +20,56 @@ load_dotenv()
 
 BOT_TOKEN     = os.getenv("TELEGRAM_BOT_TOKEN", "")
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:5001")
-CHAT_ALLOWLIST_STR = os.getenv("TELEGRAM_ALLOWED_CHATS", "")
-ALLOWED_CHATS = set(CHAT_ALLOWLIST_STR.split(",")) if CHAT_ALLOWLIST_STR else set()
+CHANNEL_ID    = os.getenv("DASHBOARD_CHANNEL_ID", "")   # e.g. -1004498661915
+API_TIMEOUT   = 90.0
 
-API_TIMEOUT = 60.0  # seconds — analysis call can take ~30s
-
-
-# ─── auth guard ───────────────────────────────────────────────────────────────
-
-def is_allowed(update: Update) -> bool:
-    if not ALLOWED_CHATS:
-        return True  # open if no allowlist configured
-    return str(update.effective_chat.id) in ALLOWED_CHATS
-
-
-async def guard(update: Update) -> bool:
-    if not is_allowed(update):
-        await update.message.reply_text("⛔ Unauthorized.")
-        return False
-    return True
+PIDFILE = "/tmp/eth-dashboard-bot.pid"
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
 def _fmt_price(v) -> str:
-    if v is None:
-        return "N/A"
+    if v is None: return "N/A"
     return f"${float(v):,.2f}"
 
-
 def _fmt_pct(v) -> str:
-    if v is None:
-        return "N/A"
+    if v is None: return "N/A"
     sign = "+" if float(v) >= 0 else ""
     return f"{sign}{float(v):.2f}%"
 
-
 def _fng_emoji(v) -> str:
-    if v is None:
-        return "❓"
+    if v is None: return "❓"
     v = int(v)
-    if v <= 20:   return "😱"
-    if v <= 40:   return "😨"
-    if v <= 60:   return "😐"
-    if v <= 80:   return "😊"
+    if v <= 20: return "😱"
+    if v <= 40: return "😨"
+    if v <= 60: return "😐"
+    if v <= 80: return "😊"
     return "🤩"
+
+
+async def _post(context: ContextTypes.DEFAULT_TYPE, update: Update, text: str):
+    """
+    Send text to the channel (if configured) and ack in DM.
+    If no channel configured, send full text in DM.
+    Splits messages longer than 4000 chars.
+    """
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+
+    if CHANNEL_ID:
+        for chunk in chunks:
+            try:
+                await context.bot.send_message(
+                    chat_id=CHANNEL_ID, text=chunk, parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"[telegram] channel post failed: {e}")
+                # fall back to DM on channel error
+                await update.message.reply_text(chunk, parse_mode="Markdown")
+                return
+        await update.message.reply_text("✅ Posted to channel")
+    else:
+        for chunk in chunks:
+            await update.message.reply_text(chunk, parse_mode="Markdown")
 
 
 async def api_get(path: str) -> dict:
@@ -86,123 +89,125 @@ async def api_post(path: str, body: dict) -> dict:
 # ─── command handlers ─────────────────────────────────────────────────────────
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update): return
     text = (
         "📊 *ETH/USDT Pre-Trade Dashboard*\n\n"
-        "/dashboard — Web dashboard link\n"
-        "/data — Live price snapshot\n"
+        "/data — Live ETH/BTC snapshot\n"
         "/news — Macro + crypto headlines\n"
         "/analysis — Full A/B/C trade assessment\n"
-        "/status — Server health check\n"
+        "/dashboard — Web dashboard link\n"
+        "/status — Server health\n"
         "/help — This message"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update): return
     await update.message.reply_text(
         f"📊 *ETH Dashboard*\n{DASHBOARD_URL}/dashboard/\n\n"
-        "Use /data for quick metrics or /analysis for full assessment.",
+        "Use /data for a quick snapshot or /analysis for the full A/B/C assessment.",
         parse_mode="Markdown",
     )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update): return
     try:
         async with httpx.AsyncClient(timeout=5) as c:
             r = await c.get(f"{DASHBOARD_URL}/dashboard/health")
             d = r.json()
-        await update.message.reply_text(f"✅ Server OK — v{d.get('version', '?')}")
+        await update.message.reply_text(f"✅ Server OK — v{d.get('version','?')}")
     except Exception as e:
         await update.message.reply_text(f"❌ Server unreachable: {e}")
 
 
 async def cmd_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update): return
     msg = await update.message.reply_text("⏳ Fetching live data…")
     try:
-        d = await api_get("/data")
-        eth = d.get("eth", {})
-        btc = d.get("btc", {})
-        fg  = d.get("fear_greed", {})
-        etg = d.get("eth_fear_greed", {})
+        d    = await api_get("/data")
+        eth  = d.get("eth",  {})
+        btc  = d.get("btc",  {})
+        fg   = d.get("fear_greed", {})
+        etg  = d.get("eth_fear_greed", {})
         tech = d.get("technicals", {})
-        gas  = d.get("gas", {})
+        gas  = d.get("gas",  {})
         der  = d.get("derivatives", {})
+        wr   = d.get("weekly_range", {})
 
         fng_val = fg.get("value")
         etg_val = etg.get("value")
+        rsi_val = tech.get("rsi")
+        rsi_cls = ("Oversold" if rsi_val and rsi_val < 30 else
+                   "Overbought" if rsi_val and rsi_val > 70 else "Neutral") if rsi_val else "N/A"
+
+        supp = tech.get("supports",    [])
+        res  = tech.get("resistances", [])
+        sup_str = " / ".join(_fmt_price(p) for p in supp) if supp else "N/A"
+        res_str = " / ".join(_fmt_price(p) for p in res)  if res  else "N/A"
 
         text = (
             f"📊 *ETH/USDT Snapshot*\n"
-            f"──────────────────\n"
-            f"ETH:  {_fmt_price(eth.get('price'))}  {_fmt_pct(eth.get('change_24h'))}\n"
-            f"BTC:  {_fmt_price(btc.get('price'))}  {_fmt_pct(btc.get('change_24h'))}\n"
-            f"BTC Dom: {btc.get('dominance', 'N/A'):.1f}%\n"
+            f"─────────────────────\n"
+            f"ETH  {_fmt_price(eth.get('price'))}  {_fmt_pct(eth.get('change_24h'))}\n"
+            f"BTC  {_fmt_price(btc.get('price'))}  {_fmt_pct(btc.get('change_24h'))}\n"
+            f"BTC Dom: {btc.get('dominance', 0):.1f}%\n"
             f"\n"
-            f"F&G:     {fng_val} {_fng_emoji(fng_val)}  ({fg.get('classification', 'N/A')})\n"
+            f"7d High: {_fmt_price(wr.get('high'))}  Low: {_fmt_price(wr.get('low'))}\n"
+            f"\n"
+            f"F&G:     {fng_val} {_fng_emoji(fng_val)}  {fg.get('classification','')}\n"
             f"ETH F&G: {etg_val} {_fng_emoji(etg_val)}\n"
             f"\n"
-            f"RSI (1D): {tech.get('rsi', 'N/A')}\n"
-            f"RSI (4H): {tech.get('rsi_4h', 'N/A')}\n"
+            f"RSI (1D): {round(rsi_val,1) if rsi_val else 'N/A'} — {rsi_cls}\n"
+            f"RSI (4H): {round(tech.get('rsi_4h',0),1) if tech.get('rsi_4h') else 'N/A'}\n"
             f"EMA20:  {_fmt_price(tech.get('ema20'))}\n"
             f"EMA50:  {_fmt_price(tech.get('ema50'))}\n"
             f"EMA200: {_fmt_price(tech.get('ema200'))}\n"
             f"\n"
-            f"Gas:  {gas.get('safe', 'N/A')} / {gas.get('fast', 'N/A')} gwei\n"
-            f"Funding: {der.get('funding_rate', 'N/A')}\n"
-            f"L/S Ratio: {der.get('long_short_ratio', 'N/A')}\n"
+            f"Support:    {sup_str}\n"
+            f"Resistance: {res_str}\n"
+            f"\n"
+            f"Gas:     {gas.get('safe','N/A')} / {gas.get('fast','N/A')} gwei\n"
+            f"Funding: {der.get('funding_rate','N/A')}\n"
+            f"L/S:     {der.get('long_short_ratio','N/A')}\n"
         )
-        supports    = tech.get("supports",    [])
-        resistances = tech.get("resistances", [])
-        if supports:
-            text += f"Support:    {' / '.join(_fmt_price(p) for p in supports)}\n"
-        if resistances:
-            text += f"Resistance: {' / '.join(_fmt_price(p) for p in resistances)}\n"
 
-        await msg.edit_text(text, parse_mode="Markdown")
+        await msg.delete()
+        await _post(context, update, text)
     except Exception as e:
-        await msg.edit_text(f"❌ Error fetching data: {e}")
+        await msg.edit_text(f"❌ Error: {e}")
 
 
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update): return
-    msg = await update.message.reply_text("⏳ Fetching news (web search)…")
+    msg = await update.message.reply_text("⏳ Searching news (~15s)…")
     try:
         d = await api_get("/news")
-        lines = ["📰 *Latest News*\n"]
+        lines = ["📰 *Market News*\n"]
 
         lines.append("*Macro:*")
         for h in d.get("macro", []):
-            tag = {"BEARISH": "🔴", "BULLISH": "🟢", "NEUTRAL": "⚪"}.get(h.get("impact", ""), "•")
-            lines.append(f"{tag} {h.get('title', '')}")
+            tag = {"BEARISH": "🔴", "BULLISH": "🟢", "NEUTRAL": "⚪"}.get(h.get("impact",""), "•")
+            lines.append(f"{tag} {h.get('title','')}")
             if h.get("detail"):
                 lines.append(f"   _{h['detail']}_")
 
-        lines.append("\n*Crypto:*")
+        lines.append("\n*Crypto / X:*")
         for h in d.get("crypto", []):
-            tag = {"BEARISH": "🔴", "BULLISH": "🟢", "NEUTRAL": "⚪"}.get(h.get("impact", ""), "•")
-            lines.append(f"{tag} {h.get('title', '')}")
+            tag = {"BEARISH": "🔴", "BULLISH": "🟢", "NEUTRAL": "⚪"}.get(h.get("impact",""), "•")
+            src = f" `{h['source']}`" if h.get("source") else ""
+            lines.append(f"{tag}{src} {h.get('title','')}")
             if h.get("detail"):
                 lines.append(f"   _{h['detail']}_")
 
-        await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+        await msg.delete()
+        await _post(context, update, "\n".join(lines))
     except Exception as e:
-        await msg.edit_text(f"❌ Error fetching news: {e}")
+        await msg.edit_text(f"❌ Error: {e}")
 
 
 async def cmd_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update): return
-    msg = await update.message.reply_text("⏳ Running full analysis (30–60s)…")
+    msg = await update.message.reply_text("⏳ Running full analysis (~45s)…")
     try:
-        # fetch data + news first
-        data = await api_get("/data")
-        news = await api_get("/news")
-        combined = {**data, "news": news}
-
-        result = await api_post("/analysis", {"data": combined})
+        data   = await api_get("/data")
+        news   = await api_get("/news")
+        result = await api_post("/analysis", {"data": {**data, "news": news}})
 
         agg  = result.get("aggregate", {})
         opts = result.get("options",   {})
@@ -211,33 +216,44 @@ async def cmd_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         B = opts.get("B", {})
         C = opts.get("C", {})
 
-        dir_emoji = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "🟡"}.get(agg.get("direction", ""), "❓")
+        dir_emoji = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "🟡"}.get(agg.get("direction",""), "❓")
 
         def zone(z):
             if isinstance(z, list) and len(z) == 2:
                 return f"{_fmt_price(z[0])} – {_fmt_price(z[1])}"
-            return str(z)
+            return str(z) if z else "N/A"
+
+        sc = result.get("scorecard", {})
+        bear = agg.get("bearish", 0)
+        bull = agg.get("bullish", 0)
+        neut = agg.get("neutral", 0)
+        total = bear + bull + neut or 18
+        bull_bar = int(round(bull / total * 20))
+        bear_bar = 20 - bull_bar
 
         text = (
             f"📊 *ETH/USDT Trade Assessment*\n"
-            f"──────────────────\n"
-            f"Bear: {agg.get('bearish','?')} | Neut: {agg.get('neutral','?')} | Bull: {agg.get('bullish','?')}\n"
-            f"Direction: {dir_emoji} *{agg.get('direction','?')}*  (score {agg.get('net_score','?')})\n"
+            f"─────────────────────────────\n"
+            f"{'🔴' * bear_bar}{'🟢' * bull_bar}\n"
+            f"Bear {bear} | Neut {neut} | Bull {bull}\n"
+            f"Direction: {dir_emoji} *{agg.get('direction','?')}*  (net {agg.get('net_score','?')})\n"
             f"\n"
-            f"*🅐 Option A — {A.get('direction','?')} {A.get('confidence','?')}%*\n"
-            f"Entry: {zone(A.get('entry_zone'))}\n"
-            f"Target: {_fmt_price(A.get('target1'))} / {_fmt_price(A.get('target2'))}\n"
-            f"Stop: {_fmt_price(A.get('stop'))}\n"
-            f"{A.get('thesis','')}\n"
+            f"┌─ 🅐 *Option A — {A.get('direction','?')} {A.get('confidence','?')}%*\n"
+            f"│ Entry:  {zone(A.get('entry_zone'))}\n"
+            f"│ Target: {_fmt_price(A.get('target1'))} → {_fmt_price(A.get('target2'))}\n"
+            f"│ Stop:   {_fmt_price(A.get('stop'))}\n"
+            f"│ _{A.get('thesis','')}_\n"
+            f"│ Risks: {', '.join(A.get('risks', []))}\n"
             f"\n"
-            f"*🅑 Option B — {B.get('direction','?')} {B.get('confidence','?')}% (contrarian)*\n"
-            f"Only if: {B.get('entry_condition','')}\n"
-            f"Entry: {zone(B.get('entry_zone'))}  Stop: {_fmt_price(B.get('stop'))}\n"
+            f"┌─ 🅑 *Option B — {B.get('direction','?')} {B.get('confidence','?')}% (contrarian)*\n"
+            f"│ Only if: {B.get('entry_condition','')}\n"
+            f"│ Entry: {zone(B.get('entry_zone'))}  Stop: {_fmt_price(B.get('stop'))}\n"
+            f"│ _{B.get('thesis','')}_\n"
             f"\n"
-            f"*🅒 Option C — WAIT*\n"
-            f"{C.get('reason','')}\n"
-            f"Watch → A: {C.get('watch_for_A','')}\n"
-            f"Watch → B: {C.get('watch_for_B','')}\n"
+            f"┌─ 🅒 *Option C — WAIT*\n"
+            f"│ {C.get('reason','')}\n"
+            f"│ → A: {C.get('watch_for_A','')}\n"
+            f"│ → B: {C.get('watch_for_B','')}\n"
             f"\n"
             f"*Ranked:*\n"
         )
@@ -246,65 +262,57 @@ async def cmd_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         flags = result.get("flags", [])
         if flags:
-            text += "\n⚠️ *Flags:*\n" + "\n".join(f"• {f}" for f in flags)
+            text += "\n⚠️ " + " | ".join(flags)
 
-        # Telegram has 4096 char limit — truncate if needed
-        if len(text) > 4000:
-            text = text[:3990] + "\n…[truncated]"
-
-        await msg.edit_text(text, parse_mode="Markdown")
+        await msg.delete()
+        await _post(context, update, text)
     except Exception as e:
         await msg.edit_text(f"❌ Analysis error: {e}")
 
 
-# ─── bot startup ──────────────────────────────────────────────────────────────
-
-PIDFILE = "/tmp/eth-dashboard-bot.pid"
-
+# ─── PID lock ─────────────────────────────────────────────────────────────────
 
 def _acquire_lock() -> bool:
-    """Return True if we got the lock (no other instance running)."""
     import signal
     if os.path.exists(PIDFILE):
         try:
             old_pid = int(open(PIDFILE).read().strip())
-            os.kill(old_pid, signal.SIG_DFL)  # raises OSError if process gone
-            print(f"[telegram] another instance already running (pid {old_pid}), exiting")
+            os.kill(old_pid, signal.SIG_DFL)
+            print(f"[telegram] another instance running (pid {old_pid}), exiting")
             return False
         except (OSError, ValueError):
-            pass  # stale pidfile — safe to overwrite
-    with open(PIDFILE, "w") as f:
-        f.write(str(os.getpid()))
+            pass
+    open(PIDFILE, "w").write(str(os.getpid()))
     return True
 
-
 def _release_lock():
-    try:
-        os.remove(PIDFILE)
-    except FileNotFoundError:
-        pass
+    try: os.remove(PIDFILE)
+    except FileNotFoundError: pass
 
+
+# ─── entry point ──────────────────────────────────────────────────────────────
 
 def run():
-    """Called by app.py supervisor OR directly when run as __main__."""
     if not BOT_TOKEN:
-        print("[telegram] TELEGRAM_BOT_TOKEN not set — bot disabled")
+        print("[telegram] TELEGRAM_BOT_TOKEN not set — disabled")
         return
-
     if not _acquire_lock():
         return
-
     try:
         application = Application.builder().token(BOT_TOKEN).build()
-        application.add_handler(CommandHandler("help",      cmd_help))
-        application.add_handler(CommandHandler("start",     cmd_help))
-        application.add_handler(CommandHandler("dashboard", cmd_dashboard))
-        application.add_handler(CommandHandler("status",    cmd_status))
-        application.add_handler(CommandHandler("data",      cmd_data))
-        application.add_handler(CommandHandler("news",      cmd_news))
-        application.add_handler(CommandHandler("analysis",  cmd_analysis))
+        for cmd, fn in [
+            ("help",      cmd_help),
+            ("start",     cmd_help),
+            ("dashboard", cmd_dashboard),
+            ("status",    cmd_status),
+            ("data",      cmd_data),
+            ("news",      cmd_news),
+            ("analysis",  cmd_analysis),
+        ]:
+            application.add_handler(CommandHandler(cmd, fn))
 
-        print(f"[telegram] bot polling… (pid {os.getpid()})", flush=True)
+        ch = f" → channel {CHANNEL_ID}" if CHANNEL_ID else " → DM only"
+        print(f"[telegram] bot polling… (pid {os.getpid()}){ch}", flush=True)
         application.run_polling(drop_pending_updates=True)
     finally:
         _release_lock()
