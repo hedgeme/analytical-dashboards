@@ -103,16 +103,14 @@ async def fetch_fear_greed(s):
 
 
 async def fetch_eth_fear_greed(s):
-    """Parse ETH-specific F&G index from ethereumfear.com HTML."""
+    """Parse ETH F&G from ethereumfear.com Next.js data blob: pageProps.index"""
     try:
         async with s.get("https://ethereumfear.com/", headers=UA_HEADERS, timeout=TIMEOUT) as r:
             html = await r.text()
+        # Value lives in __NEXT_DATA__ JSON as {"props":{"pageProps":{"index":"21",...}}}
         patterns = [
-            r'"value":\s*(\d+)',
-            r'class="fgi-value[^"]*"[^>]*>(\d+)',
-            r'<span[^>]*id="fgi[^"]*"[^>]*>(\d+)',
-            r'"fgi"[^:]*:\s*{\s*"value":\s*(\d+)',
-            r'>(\d+)<\/[a-z]+>\s*<\/div>\s*<div[^>]*class="[^"]*label',
+            r'"pageProps"\s*:\s*\{[^}]*"index"\s*:\s*"(\d+)"',
+            r'"index"\s*:\s*"(\d+)"',   # fallback — first numeric "index" field
         ]
         for pat in patterns:
             m = re.search(pat, html)
@@ -153,6 +151,28 @@ async def fetch_cq(s, path: str, params: dict = None):
         return None
     return await get(s, f"{CQ_BASE}{path}", headers=CQ_HEADERS,
                      params={"window": "day", "limit": "3", **(params or {})})
+
+
+# ── Binance Futures public API (no key — replaces CryptoQuant derivatives) ───
+
+BNB_FUTURES = "https://fapi.binance.com"
+
+async def fetch_funding_rate(s):
+    """ETH funding rate from Binance Futures — free, no key."""
+    return await get(s, f"{BNB_FUTURES}/fapi/v1/premiumIndex",
+                     params={"symbol": "ETHUSDT"})
+
+
+async def fetch_open_interest(s):
+    """ETH open interest from Binance Futures — free, no key."""
+    return await get(s, f"{BNB_FUTURES}/fapi/v1/openInterest",
+                     params={"symbol": "ETHUSDT"})
+
+
+async def fetch_long_short_ratio(s):
+    """Global long/short account ratio from Binance Futures — free, no key."""
+    return await get(s, f"{BNB_FUTURES}/futures/data/globalLongShortAccountRatio",
+                     params={"symbol": "ETHUSDT", "period": "1h", "limit": "1"})
 
 
 async def fetch_sosovalue_etf(s):
@@ -203,11 +223,11 @@ async def fetch_all_data() -> Dict:
             safe(fetch_defillama_lst(s)),
             safe(fetch_reddit(s, "ethereum")),
             safe(fetch_reddit(s, "CryptoCurrency")),
-            safe(fetch_cq(s, "/eth/exchange-flows/inflow")),
-            safe(fetch_cq(s, "/eth/derivatives/funding-rates")),
-            safe(fetch_cq(s, "/eth/derivatives/open-interest")),
-            safe(fetch_cq(s, "/eth/derivatives/long-short-ratio")),
-            safe(fetch_cq(s, "/eth/derivatives/liquidation")),
+            safe(fetch_cq(s, "/eth/exchange-flows/inflow")),   # requires Professional — returns None on Basic
+            safe(fetch_funding_rate(s)),
+            safe(fetch_open_interest(s)),
+            safe(fetch_long_short_ratio(s)),
+            safe(fetch_cq(s, "/eth/derivatives/liquidation")), # requires Professional — returns None on Basic
             safe(fetch_sosovalue_etf(s)),
         )
 
@@ -235,14 +255,31 @@ async def fetch_all_data() -> Dict:
     fng_7d      = [d.get("value") for d in (_safe_get(fng, "data") or [])]
     eth_fng_val = _safe_get(eth_fng, "value")
 
-    # ── parse CryptoQuant ─────────────────────────────────────────────────────
+    # ── parse Binance Futures derivatives ─────────────────────────────────────
+    # cq_funding → now Binance premiumIndex: {"lastFundingRate": "0.0001"}
+    # cq_oi      → now Binance openInterest: {"openInterest": "123456.78"}
+    # cq_ls      → now Binance ratio list:   [{"longShortRatio": "1.23"}]
+    bnb_funding = None
+    bnb_oi      = None
+    bnb_ls      = None
+    try:
+        bnb_funding = float(cq_funding.get("lastFundingRate", 0)) * 100 if cq_funding else None
+    except Exception: pass
+    try:
+        bnb_oi = float(cq_oi.get("openInterest", 0)) if cq_oi else None
+    except Exception: pass
+    try:
+        bnb_ls = float(cq_ls[0].get("longShortRatio", 0)) if cq_ls and isinstance(cq_ls, list) else None
+    except Exception: pass
+
     cq_data = {
-        "exchange_inflow": _cq_last(cq_flows,   "inflow_mean"),
-        "funding_rate":    _cq_last(cq_funding,  "funding_rate"),
-        "open_interest":   _cq_last(cq_oi,       "open_interest"),
-        "long_short_ratio":_cq_last(cq_ls,       "long_short_ratio"),
-        "liquidations_long":  _cq_last(cq_liq,   "liquidations_long"),
-        "liquidations_short": _cq_last(cq_liq,   "liquidations_short"),
+        "exchange_inflow":    _cq_last(cq_flows, "inflow_mean"),  # None on Basic plan
+        "funding_rate":       round(bnb_funding, 4) if bnb_funding is not None else None,
+        "open_interest":      round(bnb_oi, 0) if bnb_oi is not None else None,
+        "long_short_ratio":   round(bnb_ls, 3) if bnb_ls is not None else None,
+        "liquidations_long":  _cq_last(cq_liq, "liquidations_long"),   # None on Basic plan
+        "liquidations_short": _cq_last(cq_liq, "liquidations_short"),  # None on Basic plan
+        "source": "Binance Futures (funding/OI/LS) + CryptoQuant Basic",
     }
 
     # ── parse staking (DefiLlama) ─────────────────────────────────────────────
