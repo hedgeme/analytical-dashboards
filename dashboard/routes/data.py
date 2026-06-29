@@ -154,6 +154,29 @@ async def fetch_cq(s, path: str, params: dict = None):
                      params={"window": "day", "limit": "3", **(params or {})})
 
 
+# ── ultrasound.money public API (no key, no auth) ────────────────────────────
+USM_BASE = "https://ultrasound.money"
+
+async def fetch_usm_burn_rates(s):
+    """Burn rate in ETH/min across time frames (m5, h1, d1, d7, d30)."""
+    return await get(s, f"{USM_BASE}/api/v2/fees/burn-rates")
+
+
+async def fetch_usm_gauge_rates(s):
+    """Annual issuance rate, annual burn rate, supply growth rate — key for §10 signal."""
+    return await get(s, f"{USM_BASE}/api/v2/fees/gauge-rates")
+
+
+async def fetch_usm_supply_parts(s):
+    """Current ETH supply broken down: beacon balances, execution layer, deposits."""
+    return await get(s, f"{USM_BASE}/api/v2/fees/supply-parts")
+
+
+async def fetch_usm_scarcity(s):
+    """Scarcity metrics: total ETH staked, burned, locked with amounts and start dates."""
+    return await get(s, f"{USM_BASE}/api/fees/scarcity")
+
+
 # ── OKX public API (no key — replaces CryptoQuant derivatives) ───────────────
 # Binance is geo-restricted on this server; OKX is accessible.
 
@@ -223,6 +246,7 @@ async def fetch_all_data() -> Dict:
             reddit_eth, reddit_cc,
             cq_flows, cq_funding, cq_oi, cq_ls, cq_liq,
             etf, btc_30d,
+            usm_burn, usm_gauge, usm_supply, usm_scarcity,
         ) = await asyncio.gather(
             safe(fetch_eth_coingecko(s)),
             safe(fetch_btc_coingecko(s)),
@@ -248,6 +272,10 @@ async def fetch_all_data() -> Dict:
             safe(fetch_cq(s, "/eth/derivatives/liquidation")), # requires Professional — returns None on Basic
             safe(fetch_sosovalue_etf(s)),                      # Cloudflare-blocked from server — returns None
             safe(fetch_btc_history_30d(s)),
+            safe(fetch_usm_burn_rates(s)),
+            safe(fetch_usm_gauge_rates(s)),
+            safe(fetch_usm_supply_parts(s)),
+            safe(fetch_usm_scarcity(s)),
         )
 
     # ── parse 1D candles for technicals ──────────────────────────────────────
@@ -307,6 +335,9 @@ async def fetch_all_data() -> Dict:
     # ── parse §11 staking (DefiLlama) ─────────────────────────────────────────
     staking = _parse_staking(lido, lst)
 
+    # ── parse §10 ultrasound.money supply/burn ────────────────────────────────
+    usm_data = _parse_usm(usm_burn, usm_gauge, usm_supply, usm_scarcity)
+
     # ── parse §18 BTC/ETH correlation ─────────────────────────────────────────
     btc_30d_prices = _parse_cg_prices(btc_30d)
     eth_prices_for_corr = cg_200d_prices[-31:] if len(cg_200d_prices) >= 31 else cg_200d_prices
@@ -362,7 +393,7 @@ async def fetch_all_data() -> Dict:
             "propose": _safe_get(gas, "result", "ProposeGasPrice"),
             "fast":    _safe_get(gas, "result", "FastGasPrice"),
         },
-        "supply": supply_data,
+        "supply": {**supply_data, **usm_data},
         "staking": staking,
         "derivatives": cq_data,
         "etf_flows": etf,
@@ -435,6 +466,62 @@ def _parse_reddit(eth_raw, cc_raw) -> dict:
         "bear_pct":      round(bear_count / total * 100, 1),
         "top_titles":    [p["title"] for p in posts[:5]],
     }
+
+
+def _parse_usm(burn_raw, gauge_raw, supply_raw, scarcity_raw) -> dict:
+    """Parse ultrasound.money API responses into clean supply/burn metrics."""
+    result = {}
+    try:
+        # Burn rate: d1 window gives best daily signal
+        d1_burn = (burn_raw or {}).get("d1", {}).get("rate", {})
+        result["burn_rate_eth_per_min"] = d1_burn.get("eth_per_minute")
+        result["burn_rate_eth_per_day"] = (
+            round(d1_burn["eth_per_minute"] * 60 * 24, 2)
+            if d1_burn.get("eth_per_minute") else None
+        )
+    except Exception:
+        pass
+
+    try:
+        # Gauge rates: annual issuance, annual burn, net supply growth
+        d1_gauge = (gauge_raw or {}).get("d1", {})
+        result["issuance_rate_eth_per_year"]  = d1_gauge.get("issuance_rate_yearly", {}).get("eth")
+        result["burn_rate_eth_per_year"]       = d1_gauge.get("burn_rate_yearly", {}).get("eth")
+        result["supply_growth_rate_yearly"]    = d1_gauge.get("supply_growth_rate_yearly")
+        # Positive growth_rate = inflationary; negative = deflationary
+        sgr = d1_gauge.get("supply_growth_rate_yearly")
+        if sgr is not None:
+            result["is_deflationary"] = sgr < 0
+        issuance = d1_gauge.get("issuance_rate_yearly", {}).get("eth")
+        burn      = d1_gauge.get("burn_rate_yearly", {}).get("eth")
+        if issuance and burn:
+            result["net_daily_eth"] = round((burn - issuance) / 365, 2)  # positive = deflationary
+    except Exception:
+        pass
+
+    try:
+        # Supply parts: execution layer + beacon balances
+        sp = supply_raw or {}
+        # executionBalancesSum is in Wei (huge int-as-string), beacon values in Gwei
+        exec_wei = sp.get("executionBalancesSum")
+        beacon_gwei = sp.get("beaconBalancesSum")
+        if exec_wei:
+            result["execution_layer_eth"] = round(int(str(exec_wei).rstrip("n")) / 1e18)
+        if beacon_gwei:
+            result["beacon_layer_eth"] = round(int(str(beacon_gwei).rstrip("n")) / 1e9)
+    except Exception:
+        pass
+
+    try:
+        # Scarcity: total ETH staked (the canonical live figure from ultrasound.money)
+        engines = (scarcity_raw or {}).get("engines", {})
+        staked = engines.get("staked", {})
+        if staked.get("amount"):
+            result["total_eth_staked_usm"] = round(int(str(staked["amount"]).rstrip("n")) / 1e18)
+    except Exception:
+        pass
+
+    return result
 
 
 def _parse_supply(raw) -> dict:
