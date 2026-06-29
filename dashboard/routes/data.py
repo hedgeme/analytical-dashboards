@@ -193,17 +193,12 @@ async def fetch_sosovalue_etf(s):
 
 
 async def fetch_eth_supply(s):
-    """Etherscan ethsupply2: circulating supply, total burned, ETH2 staking (all in Wei)."""
+    """Etherscan ethsupply2: circulating supply, total burned, beacon deposits (all in Wei)."""
     if not ETHERSCAN_KEY:
         return None
     return await get(s, "https://api.etherscan.io/v2/api", params={
         "chainid": "1", "module": "stats", "action": "ethsupply2", "apikey": ETHERSCAN_KEY,
     })
-
-
-async def fetch_beaconchain(s):
-    """beaconcha.in latest epoch: validator count → total ETH staked."""
-    return await get(s, "https://beaconcha.in/api/v1/epoch/latest", headers=UA_HEADERS)
 
 
 async def fetch_btc_history_30d(s):
@@ -227,7 +222,7 @@ async def fetch_all_data() -> Dict:
             lido, lst,
             reddit_eth, reddit_cc,
             cq_flows, cq_funding, cq_oi, cq_ls, cq_liq,
-            etf, beaconchain, btc_30d,
+            etf, btc_30d,
         ) = await asyncio.gather(
             safe(fetch_eth_coingecko(s)),
             safe(fetch_btc_coingecko(s)),
@@ -251,8 +246,7 @@ async def fetch_all_data() -> Dict:
             safe(fetch_open_interest(s)),
             safe(fetch_long_short_ratio(s)),
             safe(fetch_cq(s, "/eth/derivatives/liquidation")), # requires Professional — returns None on Basic
-            safe(fetch_sosovalue_etf(s)),
-            safe(fetch_beaconchain(s)),
+            safe(fetch_sosovalue_etf(s)),                      # Cloudflare-blocked from server — returns None
             safe(fetch_btc_history_30d(s)),
         )
 
@@ -310,8 +304,8 @@ async def fetch_all_data() -> Dict:
     # ── parse §10 supply/burn (Etherscan ethsupply2) ─────────────────────────
     supply_data = _parse_supply(eth_supply)
 
-    # ── parse §11 staking (beaconcha.in + DefiLlama) ──────────────────────────
-    staking = _parse_staking(lido, lst, beaconchain)
+    # ── parse §11 staking (DefiLlama) ─────────────────────────────────────────
+    staking = _parse_staking(lido, lst)
 
     # ── parse §18 BTC/ETH correlation ─────────────────────────────────────────
     btc_30d_prices = _parse_cg_prices(btc_30d)
@@ -450,33 +444,19 @@ def _parse_supply(raw) -> dict:
         def _wei(key):
             v = r.get(key)
             return round(int(v) / 1e18) if v else None
-        circulating = _wei("EthSupply")
-        burned       = _wei("BurntFees")
-        staked_eth2  = _wei("Eth2Staking")
-        rewards      = _wei("ValidatorRewards")
         return {
-            "circulating_eth":   circulating,
-            "total_burned_eth":  burned,
-            "eth2_staking_eth":  staked_eth2,
-            "validator_rewards": rewards,
+            "circulating_eth":        _wei("EthSupply"),
+            "total_burned_eth":       _wei("BurntFees"),
+            "beacon_net_deposits_eth": _wei("Eth2Staking"),   # cumulative deposits, NOT total staked
+            "beacon_withdrawn_eth":   _wei("WithdrawnTotal"),
         }
     except Exception as e:
         print(f"[data] supply parse: {e}")
         return {}
 
 
-def _parse_staking(lido_raw, lst_raw=None, beacon_raw=None) -> dict:
+def _parse_staking(lido_raw, lst_raw=None) -> dict:
     result = {}
-
-    # Total ETH staked + validator count from beaconcha.in
-    try:
-        d = (beacon_raw or {}).get("data", {})
-        validators = d.get("validatorscount") or d.get("activevalidators")
-        if validators:
-            result["total_validators"]  = int(validators)
-            result["total_eth_staked"]  = int(validators) * 32
-    except Exception:
-        pass
 
     # Staking APR from DefiLlama LST pools (stETH / wstETH)
     try:
@@ -501,6 +481,9 @@ def _parse_staking(lido_raw, lst_raw=None, beacon_raw=None) -> dict:
             result["lido_tvl_usd"] = tvl[-1]["totalLiquidityUSD"]
     except Exception:
         pass
+
+    # Total ETH staked — requires CryptoQuant Pro or beaconcha.in paid key
+    result["total_eth_staked_note"] = "~34M ETH estimated — live data requires CryptoQuant Professional"
 
     return result
 
