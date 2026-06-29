@@ -177,6 +177,11 @@ async def fetch_usm_scarcity(s):
     return await get(s, f"{USM_BASE}/api/fees/scarcity")
 
 
+async def fetch_defillama_cexs(s):
+    """DefiLlama CEX overview — public, no key. 90 exchanges with 24h/1w/1m net inflows."""
+    return await get(s, "https://api.llama.fi/cexs")
+
+
 # ── OKX public API (no key — replaces CryptoQuant derivatives) ───────────────
 # Binance is geo-restricted on this server; OKX is accessible.
 
@@ -247,6 +252,7 @@ async def fetch_all_data() -> Dict:
             cq_flows, cq_funding, cq_oi, cq_ls, cq_liq,
             etf, btc_30d,
             usm_burn, usm_gauge, usm_supply, usm_scarcity,
+            cex_flows,
         ) = await asyncio.gather(
             safe(fetch_eth_coingecko(s)),
             safe(fetch_btc_coingecko(s)),
@@ -276,6 +282,7 @@ async def fetch_all_data() -> Dict:
             safe(fetch_usm_gauge_rates(s)),
             safe(fetch_usm_supply_parts(s)),
             safe(fetch_usm_scarcity(s)),
+            safe(fetch_defillama_cexs(s)),
         )
 
     # ── parse 1D candles for technicals ──────────────────────────────────────
@@ -338,6 +345,9 @@ async def fetch_all_data() -> Dict:
     # ── parse §10 ultrasound.money supply/burn ────────────────────────────────
     usm_data = _parse_usm(usm_burn, usm_gauge, usm_supply, usm_scarcity)
 
+    # ── parse §16 exchange flows (DefiLlama CEX) ──────────────────────────────
+    cex_data = _parse_cex_flows(cex_flows)
+
     # ── parse §18 BTC/ETH correlation ─────────────────────────────────────────
     btc_30d_prices = _parse_cg_prices(btc_30d)
     eth_prices_for_corr = cg_200d_prices[-31:] if len(cg_200d_prices) >= 31 else cg_200d_prices
@@ -397,10 +407,7 @@ async def fetch_all_data() -> Dict:
         "staking": staking,
         "derivatives": cq_data,
         "etf_flows": etf,
-        "exchange_flows": {
-            "net_inflow_eth": cq_data.get("exchange_inflow"),
-            "source": "CryptoQuant" if cq_data.get("exchange_inflow") is not None else "unavailable — CryptoQuant Professional required",
-        },
+        "exchange_flows": cex_data,
         "reddit": reddit_summary,
         "candles_1d": candles_1d[-100:],  # last 100 for chart
         "candles_4h": candles_4h[-100:],
@@ -466,6 +473,44 @@ def _parse_reddit(eth_raw, cc_raw) -> dict:
         "bear_pct":      round(bear_count / total * 100, 1),
         "top_titles":    [p["title"] for p in posts[:5]],
     }
+
+
+def _parse_cex_flows(raw) -> dict:
+    """Parse DefiLlama CEX flows. Negative inflow = net outflow = accumulation (bullish)."""
+    MAJOR = {"Binance", "OKX", "Coinbase", "Bybit", "Kraken", "Bitfinex", "HTX", "KuCoin"}
+    try:
+        cexs = (raw or {}).get("cexs", [])
+        major = [x for x in cexs if x.get("name") in MAJOR]
+        all_cexs = [x for x in cexs if x.get("inflows_24h") is not None]
+
+        def _sum(lst, key):
+            vals = [x.get(key) for x in lst if x.get(key) is not None]
+            return round(sum(vals) / 1e6, 1) if vals else None  # convert to $M
+
+        total_24h = _sum(all_cexs, "inflows_24h")
+        total_1w   = _sum(all_cexs, "inflows_1w")
+
+        breakdown = {
+            x["name"]: {
+                "inflow_24h_usd_m": round(x["inflows_24h"] / 1e6, 1) if x.get("inflows_24h") is not None else None,
+                "inflow_1w_usd_m":  round(x["inflows_1w"]  / 1e6, 1) if x.get("inflows_1w")  is not None else None,
+                "tvl_usd_b":        round(x["currentTvl"]  / 1e9, 2) if x.get("currentTvl")  is not None else None,
+            }
+            for x in major
+        }
+
+        # Signal: net negative = outflows = accumulation = bullish (+1 if < -$100M)
+        direction = "outflow" if (total_24h or 0) < 0 else "inflow"
+        return {
+            "source": "DefiLlama",
+            "total_24h_usd_m": total_24h,
+            "total_1w_usd_m":  total_1w,
+            "direction_24h":   direction,
+            "exchanges":       breakdown,
+        }
+    except Exception as e:
+        print(f"[data] cex flows parse: {e}")
+        return {"source": "DefiLlama", "error": str(e)}
 
 
 def _parse_usm(burn_raw, gauge_raw, supply_raw, scarcity_raw) -> dict:
