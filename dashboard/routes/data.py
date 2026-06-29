@@ -128,8 +128,9 @@ async def fetch_eth_fear_greed(s):
 async def fetch_gas(s):
     if not ETHERSCAN_KEY:
         return None
-    return await get(s, "https://api.etherscan.io/api", params={
-        "module": "gastracker", "action": "gasoracle", "apikey": ETHERSCAN_KEY,
+    # V2 API (V1 deprecated June 2025)
+    return await get(s, "https://api.etherscan.io/v2/api", params={
+        "chainid": "1", "module": "gastracker", "action": "gasoracle", "apikey": ETHERSCAN_KEY,
     })
 
 
