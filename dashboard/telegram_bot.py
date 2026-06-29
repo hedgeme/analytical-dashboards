@@ -259,23 +259,55 @@ async def cmd_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── bot startup ──────────────────────────────────────────────────────────────
 
+PIDFILE = "/tmp/eth-dashboard-bot.pid"
+
+
+def _acquire_lock() -> bool:
+    """Return True if we got the lock (no other instance running)."""
+    import signal
+    if os.path.exists(PIDFILE):
+        try:
+            old_pid = int(open(PIDFILE).read().strip())
+            os.kill(old_pid, signal.SIG_DFL)  # raises OSError if process gone
+            print(f"[telegram] another instance already running (pid {old_pid}), exiting")
+            return False
+        except (OSError, ValueError):
+            pass  # stale pidfile — safe to overwrite
+    with open(PIDFILE, "w") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def _release_lock():
+    try:
+        os.remove(PIDFILE)
+    except FileNotFoundError:
+        pass
+
+
 def run():
-    """Called by app.py background thread OR directly when run as __main__."""
+    """Called by app.py supervisor OR directly when run as __main__."""
     if not BOT_TOKEN:
         print("[telegram] TELEGRAM_BOT_TOKEN not set — bot disabled")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("help",      cmd_help))
-    app.add_handler(CommandHandler("start",     cmd_help))
-    app.add_handler(CommandHandler("dashboard", cmd_dashboard))
-    app.add_handler(CommandHandler("status",    cmd_status))
-    app.add_handler(CommandHandler("data",      cmd_data))
-    app.add_handler(CommandHandler("news",      cmd_news))
-    app.add_handler(CommandHandler("analysis",  cmd_analysis))
+    if not _acquire_lock():
+        return
 
-    print("[telegram] bot polling…")
-    app.run_polling(drop_pending_updates=True)
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        application.add_handler(CommandHandler("help",      cmd_help))
+        application.add_handler(CommandHandler("start",     cmd_help))
+        application.add_handler(CommandHandler("dashboard", cmd_dashboard))
+        application.add_handler(CommandHandler("status",    cmd_status))
+        application.add_handler(CommandHandler("data",      cmd_data))
+        application.add_handler(CommandHandler("news",      cmd_news))
+        application.add_handler(CommandHandler("analysis",  cmd_analysis))
+
+        print(f"[telegram] bot polling… (pid {os.getpid()})", flush=True)
+        application.run_polling(drop_pending_updates=True)
+    finally:
+        _release_lock()
 
 
 if __name__ == "__main__":
