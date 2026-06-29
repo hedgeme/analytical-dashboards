@@ -28,14 +28,22 @@ def health():
 
 
 def _bot_supervisor():
-    """Run telegram_bot.py as a subprocess with auto-restart on crash."""
+    """Run telegram_bot.py as a subprocess with auto-restart on crash.
+    Backs off if the bot exits too quickly (e.g. PID lock collision)."""
     script = str(pathlib.Path(__file__).parent / "telegram_bot.py")
     while True:
         print("[telegram] starting bot process…", flush=True)
+        t_start = time.time()
         proc = subprocess.Popen([sys.executable, script], env=os.environ.copy())
         code = proc.wait()
-        print(f"[telegram] bot exited (code {code}), restarting in 5s…", flush=True)
-        time.sleep(5)
+        elapsed = time.time() - t_start
+        if elapsed < 3:
+            # Exited almost immediately — likely PID lock: another instance is running.
+            print(f"[telegram] bot exited in {elapsed:.1f}s — another instance may be running; waiting 30s", flush=True)
+            time.sleep(30)
+        else:
+            print(f"[telegram] bot exited (code {code}), restarting in 10s…", flush=True)
+            time.sleep(10)
 
 
 if __name__ == "__main__":
