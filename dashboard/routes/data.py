@@ -182,6 +182,28 @@ async def fetch_defillama_cexs(s):
     return await get(s, "https://api.llama.fi/cexs")
 
 
+# ── TradingView scanner (no key, public) ──────────────────────────────────────
+TV_SCANNER = "https://scanner.tradingview.com/america/scan"
+TV_ETH_TICKERS = ["NASDAQ:ETHA", "CBOE:FETH", "CBOE:ETHV", "AMEX:ETHE",
+                   "AMEX:ETH",   "AMEX:ETHW", "CBOE:TETH", "CBOE:QETH"]
+TV_BTC_TICKERS = ["NASDAQ:IBIT", "CBOE:FBTC",  "AMEX:GBTC", "AMEX:BTC",
+                   "CBOE:BTCO",  "CBOE:BTCW"]
+TV_COLS = ["name", "description", "close", "volume", "change",
+           "average_volume_10d_calc", "average_volume_30d_calc", "relative_volume_10d_calc"]
+
+async def fetch_tv_etfs(s):
+    """TradingView scanner: price, volume, rel-vol for major ETH + BTC spot ETFs. No key."""
+    payload = {
+        "symbols": {"tickers": TV_ETH_TICKERS + TV_BTC_TICKERS},
+        "columns": TV_COLS,
+    }
+    async with s.post(TV_SCANNER, json=payload,
+                      headers={**UA_HEADERS, "Content-Type": "application/json"},
+                      timeout=TIMEOUT) as r:
+        r.raise_for_status()
+        return await r.json(content_type=None)
+
+
 # ── OKX public API (no key — replaces CryptoQuant derivatives) ───────────────
 # Binance is geo-restricted on this server; OKX is accessible.
 
@@ -252,7 +274,7 @@ async def fetch_all_data() -> Dict:
             cq_flows, cq_funding, cq_oi, cq_ls, cq_liq,
             etf, btc_30d,
             usm_burn, usm_gauge, usm_supply, usm_scarcity,
-            cex_flows,
+            cex_flows, tv_etfs,
         ) = await asyncio.gather(
             safe(fetch_eth_coingecko(s)),
             safe(fetch_btc_coingecko(s)),
@@ -283,6 +305,7 @@ async def fetch_all_data() -> Dict:
             safe(fetch_usm_supply_parts(s)),
             safe(fetch_usm_scarcity(s)),
             safe(fetch_defillama_cexs(s)),
+            safe(fetch_tv_etfs(s)),
         )
 
     # ── parse 1D candles for technicals ──────────────────────────────────────
@@ -348,6 +371,9 @@ async def fetch_all_data() -> Dict:
     # ── parse §16 exchange flows (DefiLlama CEX) ──────────────────────────────
     cex_data = _parse_cex_flows(cex_flows)
 
+    # ── parse §8 ETF data (TradingView scanner) ────────────────────────────────
+    etf_tv = _parse_tv_etfs(tv_etfs)
+
     # ── parse §18 BTC/ETH correlation ─────────────────────────────────────────
     btc_30d_prices = _parse_cg_prices(btc_30d)
     eth_prices_for_corr = cg_200d_prices[-31:] if len(cg_200d_prices) >= 31 else cg_200d_prices
@@ -406,7 +432,7 @@ async def fetch_all_data() -> Dict:
         "supply": {**supply_data, **usm_data},
         "staking": staking,
         "derivatives": cq_data,
-        "etf_flows": etf,
+        "etf_flows": etf_tv,
         "exchange_flows": cex_data,
         "reddit": reddit_summary,
         "candles_1d": candles_1d[-100:],  # last 100 for chart
@@ -473,6 +499,73 @@ def _parse_reddit(eth_raw, cc_raw) -> dict:
         "bear_pct":      round(bear_count / total * 100, 1),
         "top_titles":    [p["title"] for p in posts[:5]],
     }
+
+
+def _parse_tv_etfs(raw) -> dict:
+    """
+    Parse TradingView scanner ETF data into §8-scoreable signals.
+    Net dollar flows unavailable (paywalled everywhere); we use volume × price
+    and relative volume as institutional sentiment proxy.
+    """
+    ETH_SET = {t.split(":")[1] for t in TV_ETH_TICKERS}
+    BTC_SET = {t.split(":")[1] for t in TV_BTC_TICKERS}
+
+    eth_etfs, btc_etfs = [], []
+    try:
+        for row in (raw or {}).get("data", []):
+            ticker = row["s"].split(":")[1]
+            cols   = TV_COLS
+            vals   = row["d"]
+            d = dict(zip(cols, vals))
+            entry = {
+                "ticker":      ticker,
+                "name":        d.get("description"),
+                "price":       d.get("close"),
+                "volume":      d.get("volume"),
+                "change_pct":  round(d["change"], 2) if d.get("change") is not None else None,
+                "rel_vol_10d": round(d["relative_volume_10d_calc"], 2) if d.get("relative_volume_10d_calc") else None,
+                "avg_vol_30d": d.get("average_volume_30d_calc"),
+                "dollar_vol":  round(d["close"] * d["volume"] / 1e6, 1) if d.get("close") and d.get("volume") else None,
+            }
+            if ticker in ETH_SET:
+                eth_etfs.append(entry)
+            elif ticker in BTC_SET:
+                btc_etfs.append(entry)
+
+        def _summarise(etfs):
+            valid = [e for e in etfs if e["change_pct"] is not None]
+            if not valid:
+                return {}
+            avg_chg   = round(sum(e["change_pct"] for e in valid) / len(valid), 2)
+            total_dvol = round(sum(e["dollar_vol"] or 0 for e in valid), 1)
+            # Biggest ETF by dollar volume drives the signal
+            lead  = max(valid, key=lambda e: e["dollar_vol"] or 0)
+            rv    = lead.get("rel_vol_10d")
+            # Sentiment: price up + rel_vol > 1 = inflow signal; price down + rel_vol > 1 = outflow
+            if avg_chg > 0.5 and (rv or 1) >= 1.0:
+                sentiment = "BULLISH"
+            elif avg_chg < -0.5 and (rv or 1) >= 1.0:
+                sentiment = "BEARISH"
+            else:
+                sentiment = "NEUTRAL"
+            return {
+                "avg_change_pct":    avg_chg,
+                "total_dollar_vol_m": total_dvol,
+                "lead_etf":          lead["ticker"],
+                "lead_etf_name":     lead["name"],
+                "lead_rel_vol":      rv,
+                "sentiment":         sentiment,
+                "etfs":              valid,
+            }
+
+        return {
+            "source": "TradingView (volume proxy — net flows require paid API)",
+            "eth":    _summarise(eth_etfs),
+            "btc":    _summarise(btc_etfs),
+        }
+    except Exception as e:
+        print(f"[data] tv_etf parse: {e}")
+        return {"source": "TradingView", "error": str(e)}
 
 
 def _parse_cex_flows(raw) -> dict:
