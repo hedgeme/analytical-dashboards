@@ -51,7 +51,9 @@ Section scores:
 §9  Gas: >50 gwei = +1; 10–50 = +0.5; 1–10 = 0; <1 = −0.5
 §10 Supply/burn: net deflationary = +0.5; inflationary = −0.5; unknown = 0
 §11 Staking flows: net staking inflow = +0.5; large unstaking >50K = −1; else 0
-§12 Reddit sentiment: >60% bull posts = +0.5; >60% bear posts = −0.5; security alerts = −1
+§12 Social sentiment: Reddit >60% bull = +0.5; >60% bear = −0.5; security alerts = −1
+    Key X/Twitter signals: @WatcherGuru alert = HIGH impact; @VitalikButerin post = ETH-specific;
+    @cz_binance = market sentiment; @Bitcoin/@BitcoinNews = BTC narrative; @ethereum = protocol news
 §13 Derivatives: long/short >1.5 = +0.5 (squeeze risk); funding <−0.05% = +0.5 (shorts crowded);
     OI rising + price falling = −1; else 0
 §14 Macro: risk-off = −1; risk-on = +1; neutral = 0

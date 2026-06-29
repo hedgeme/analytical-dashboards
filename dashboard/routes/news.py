@@ -33,14 +33,25 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
   ]
 }"""
 
-CRYPTO_PROMPT = """Search for the top 3 crypto news events from the last 24 hours. Focus on:
-Ethereum and Bitcoin price action, exchange hacks or exploits (check PeckShield, CertiK),
-ETF flow data, SEC or regulatory actions, major protocol upgrades, large liquidations.
+CRYPTO_PROMPT = """Search for the top 3 most important crypto news events from the last 24 hours.
+
+Priority sources to check (search each):
+- @WatcherGuru — major market-moving alerts
+- @cz_binance — Binance and crypto market commentary
+- @BitcoinNews / @Bitcoin — BTC news and sentiment
+- @VitalikButerin — Ethereum protocol announcements
+- @ethereum — official Ethereum Foundation updates
+- @PeckShieldAlert / @CertiKAlert — exchange hacks, exploits, smart contract vulnerabilities
+
+Also cover: ETH/BTC price action, ETF flow data, SEC or regulatory actions, protocol upgrades,
+large liquidation events.
+
+Flag any security exploits or hacks as BEARISH and mark them HIGH priority.
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
 {
   "headlines": [
-    {"title": "...", "impact": "BEARISH|BULLISH|NEUTRAL", "detail": "one sentence"}
+    {"title": "...", "impact": "BEARISH|BULLISH|NEUTRAL", "detail": "one sentence", "source": "@handle or outlet"}
   ]
 }"""
 
