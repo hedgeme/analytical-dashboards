@@ -104,7 +104,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/data — Live ETH/BTC snapshot\n"
         "/news — Macro + crypto headlines\n"
         "/analysis — Full A/B/C trade assessment\n"
-        "/dashboard — Web dashboard link\n"
         "/status — Server health\n"
         "/help — This message"
     )
@@ -113,8 +112,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"📊 *ETH Dashboard*\n{DASHBOARD_URL}/dashboard/\n\n"
-        "Use /data for a quick snapshot or /analysis for the full A/B/C assessment.",
+        f"📊 *ETH Dashboard*\nAPI server: `{DASHBOARD_URL}/dashboard/api/`\n\n"
+        "Use /data for a live snapshot or /analysis for the full A/B/C assessment.",
         parse_mode="Markdown",
     )
 
@@ -166,8 +165,13 @@ async def cmd_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ── derived values ────────────────────────────────────────────────────
         rsi_val = tech.get("rsi")
-        rsi_cls = ("Oversold (<30)" if rsi_val and rsi_val < 30 else
-                   "Overbought (>70)" if rsi_val and rsi_val > 70 else "Neutral") if rsi_val else "N/A"
+        rsi_cls = (
+            "Oversold"        if rsi_val < 30 else
+            "Near Oversold"   if rsi_val < 45 else
+            "Neutral"         if rsi_val < 55 else
+            "Near Overbought" if rsi_val < 70 else
+            "Overbought"
+        ) if rsi_val else "N/A"
         supp = tech.get("supports",    [])
         res  = tech.get("resistances", [])
 
