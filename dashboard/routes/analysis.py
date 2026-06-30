@@ -721,38 +721,57 @@ def _build_options(data, news, scores_dict, weighted_net) -> dict:
     def _driver_text(sections, n=2):
         return "; ".join(f"{k} ({v['value'][:60]})" for k, v in sections[:n])
 
+    rsi = 50.0
+    try:
+        rsi = float(_g(data, "technicals", "rsi") or 50)
+    except (TypeError, ValueError):
+        pass
+
+    # Nearest overhead EMA for short stop anchoring
+    def _overhead_ema():
+        if ema20 and ema20 > price: return round(ema20)
+        if ema50 and ema50 > price: return round(ema50)
+        return round(res1)
+
+    # Nearest below EMA for long stop anchoring
+    def _below_ema():
+        if ema20 and ema20 < price: return round(ema20)
+        if ema50 and ema50 < price: return round(ema50)
+        return round(sup1)
+
     if is_long:
-        pct_to_s1 = (price - sup1) / price if price > 0 else 1.0
-        if pct_to_s1 <= 0.05:
-            # Price near support — standard dip-to-support long entry
-            long_anchor     = sup1
-            long_anchor_lbl = f"{_fmt_price(sup1)} support"
-            entry_a         = [round(sup1 * 1.002), round(sup1 * 1.012)]
-            stop_a          = round(sup1 * 0.96)
-            cond_a          = f"ETH holds above {_fmt_price(sup1)} AND BTC reclaims {_fmt_price(btc_sup)}"
+        if rsi > 65:
+            # Overbought — wait for pullback to EMA20 before entering long
+            below           = _below_ema()
+            long_anchor_lbl = f"EMA20 pullback {_fmt_price(below)}"
+            entry_a         = [round(below * 0.995), round(below * 1.005)]
+            stop_a          = round(below * 0.955)
+            cond_a          = f"ETH pulls back to {long_anchor_lbl} and holds AND BTC holds {_fmt_price(btc_sup)}"
+        elif rsi >= 45:
+            # Neutral RSI — enter on minor 1–2% dip from current price
+            dip             = round(price * 0.985)
+            long_anchor_lbl = f"minor dip {_fmt_price(dip)}"
+            entry_a         = [round(price * 0.980), round(price * 0.990)]
+            stop_a          = round(max(sup1 * 0.965, price * 0.935))
+            cond_a          = f"ETH dips to {long_anchor_lbl} and holds AND BTC holds {_fmt_price(btc_sup)}"
         else:
-            # Price far above support — anchor entry to nearest EMA below or current zone
-            if ema20 and price > ema20:
-                long_anchor     = round(ema20)
-                long_anchor_lbl = f"EMA20 {_fmt_price(long_anchor)} pullback"
-            else:
-                long_anchor     = round(price * 0.985)
-                long_anchor_lbl = f"current zone {_fmt_price(long_anchor)}"
-            entry_a = [round(long_anchor * 0.995), round(long_anchor * 1.005)]
-            stop_a  = round(long_anchor * 0.96)
-            cond_a  = f"ETH pulls back to {long_anchor_lbl} and holds AND BTC reclaims {_fmt_price(btc_sup)}"
+            # RSI oversold — enter near market now (capitulation bounce setup)
+            long_anchor_lbl = f"near market {_fmt_price(round(price))}"
+            entry_a         = [round(price * 0.997), round(price * 1.010)]
+            stop_a          = round(max(sup1 * 0.965, price * 0.935))
+            cond_a          = f"ETH holds above {_fmt_price(round(price * 0.997))} AND BTC reclaims {_fmt_price(btc_sup)}"
 
         target1_a = round(res1)
         target2_a = round(res2)
         manual_a  = round(sum(entry_a) / 2 * 1.07)
         thesis_a  = (
             f"Weighted net {weighted_net:+.1f} — bullish bias driven by {_driver_text(bull_sections)}. "
-            f"Entry at {long_anchor_lbl} with {_fmt_price(res1)} as first objective. "
-            f"BTC {_fmt_price(btc_price)} must hold {_fmt_price(btc_sup)} for confirmation."
+            f"Entry at {long_anchor_lbl} targeting {_fmt_price(res1)}. "
+            f"BTC {_fmt_price(btc_price)} must hold {_fmt_price(btc_sup)}."
         )
         risks_a   = [
             f"BTC loses {_fmt_price(btc_sup)} → invalidates long setup",
-            f"Close below {_fmt_price(sup1)} support triggers stop at {_fmt_price(stop_a)}",
+            f"Stop at {_fmt_price(stop_a)} — close below triggers exit",
             f"Bear counter: {_driver_text(bear_sections, 1) or 'limited downside catalysts'}",
         ]
 
@@ -763,44 +782,43 @@ def _build_options(data, news, scores_dict, weighted_net) -> dict:
         manual_b  = round(sum(entry_b) / 2 * 0.97)
         cond_b    = f"ETH rejects {_fmt_price(res1)} resistance AND BTC loses {_fmt_price(btc_res)}"
         thesis_b  = (
-            f"Contrarian short: price approaching resistance at {_fmt_price(res1)} "
-            f"with bearish signals from {_driver_text(bear_sections)}. "
-            f"Only valid on clean rejection — do not front-run."
+            f"Contrarian short: primary bias bullish but {_driver_text(bear_sections)} "
+            f"may cap upside at {_fmt_price(res1)}. Only on clean rejection — do not front-run."
         )
         risks_b   = [
-            f"Breakout above {_fmt_price(res1)} — short squeezed to {_fmt_price(res2)}",
-            f"Weighted net is positive ({weighted_net:+.1f}) — primary bias opposes this trade",
+            f"Breakout above {_fmt_price(res1)} → short squeezed to {_fmt_price(res2)}",
+            f"Weighted net positive ({weighted_net:+.1f}) — primary bias opposes this trade",
         ]
         reason_c  = (
-            f"Long setup (A) requires ETH to pull back to {long_anchor_lbl} and hold; short setup (B) requires "
-            f"rejection at {_fmt_price(res1)}. Both entries need BTC confirmation."
+            f"Long (A) enters at {long_anchor_lbl}; short (B) needs rejection at {_fmt_price(res1)}. "
+            f"BTC direction is the deciding factor."
         )
-        watch_a   = f"ETH pulls back to {long_anchor_lbl} with 4h candle close above and volume expansion"
+        watch_a   = f"ETH at {long_anchor_lbl} with 4h close above and volume expansion"
         watch_b   = f"ETH wick rejection at {_fmt_price(res1)} on elevated volume"
 
-    else:
-        pct_to_r1 = (res1 - price) / price if price > 0 else 1.0
-        if pct_to_r1 <= 0.05:
-            # Price near resistance — standard resistance-fade short entry
-            short_anchor     = res1
-            short_anchor_lbl = f"{_fmt_price(res1)} resistance"
-            entry_a          = [round(res1 * 0.99), round(res1 * 1.005)]
-            stop_a           = round(res1 * 1.04)
-            cond_a           = f"ETH fails to hold {_fmt_price(res1)} resistance AND BTC loses {_fmt_price(btc_sup)}"
+    else:  # SHORT
+        if rsi < 30:
+            # Extremely oversold — wait for EMA20 bounce before shorting
+            overhead         = _overhead_ema()
+            short_anchor_lbl = f"EMA20 retest {_fmt_price(overhead)}"
+            entry_a          = [round(overhead * 0.990), round(overhead * 1.005)]
+            stop_a           = round(overhead * 1.04)
+            cond_a           = f"ETH bounces to {short_anchor_lbl} and rejects AND BTC loses {_fmt_price(btc_sup)}"
+        elif rsi <= 45:
+            # Near-oversold — enter on minor 1–2% bounce from current price
+            bounce           = round(price * 1.015)
+            short_anchor_lbl = f"minor bounce {_fmt_price(bounce)}"
+            entry_a          = [round(price * 1.005), round(price * 1.020)]
+            overhead         = _overhead_ema()
+            stop_a           = round(min(overhead * 1.020, price * 1.07))
+            cond_a           = f"ETH bounces to {short_anchor_lbl} and stalls AND BTC loses {_fmt_price(btc_sup)}"
         else:
-            # Price already well below R1 — anchor entry to nearest overhead EMA
-            if ema20 and ema20 > price:
-                short_anchor     = round(ema20)
-                short_anchor_lbl = f"EMA20 {_fmt_price(short_anchor)} retest"
-            elif ema50 and ema50 > price:
-                short_anchor     = round(ema50)
-                short_anchor_lbl = f"EMA50 {_fmt_price(short_anchor)} retest"
-            else:
-                short_anchor     = round(price * 1.015)
-                short_anchor_lbl = f"current zone {_fmt_price(short_anchor)}"
-            entry_a = [round(short_anchor * 0.99), round(short_anchor * 1.005)]
-            stop_a  = round(short_anchor * 1.04)
-            cond_a  = f"ETH bounces to {short_anchor_lbl} and rejects AND BTC loses {_fmt_price(btc_sup)}"
+            # Neutral-to-overbought RSI — enter near market now
+            short_anchor_lbl = f"near market {_fmt_price(round(price))}"
+            entry_a          = [round(price * 0.993), round(price * 1.005)]
+            overhead         = _overhead_ema()
+            stop_a           = round(min(overhead * 1.015, price * 1.06))
+            cond_a           = f"ETH fails to hold {_fmt_price(round(price * 1.005))} AND BTC loses {_fmt_price(btc_sup)}"
 
         target1_a = round(sup1)
         target2_a = round(sup2)
@@ -812,7 +830,7 @@ def _build_options(data, news, scores_dict, weighted_net) -> dict:
         )
         risks_a   = [
             f"BTC reclaims {_fmt_price(btc_res)} → breaks bear thesis",
-            f"Close above {_fmt_price(res1)} triggers stop at {_fmt_price(stop_a)}",
+            f"Stop at {_fmt_price(stop_a)} — close above triggers exit",
             f"Bull counter: {_driver_text(bull_sections, 1) or 'limited upside catalysts'}",
         ]
 
@@ -823,18 +841,18 @@ def _build_options(data, news, scores_dict, weighted_net) -> dict:
         manual_b  = round(sum(entry_b) / 2 * 1.05)
         cond_b    = f"ETH bounces from {_fmt_price(sup1)} AND BTC holds {_fmt_price(btc_sup)}"
         thesis_b  = (
-            f"Contrarian long: primary bias is bearish but {_driver_text(bull_sections)} "
-            f"may support a bounce from {_fmt_price(sup1)}. Only on confirmed support hold."
+            f"Contrarian long: primary bias bearish but {_driver_text(bull_sections)} "
+            f"may support bounce from {_fmt_price(sup1)}. Only on confirmed support hold."
         )
         risks_b   = [
             f"Support at {_fmt_price(sup1)} fails → flush to {_fmt_price(sup2)}",
-            f"Weighted net is negative ({weighted_net:+.1f}) — primary bias opposes this trade",
+            f"Weighted net negative ({weighted_net:+.1f}) — primary bias opposes this trade",
         ]
         reason_c  = (
-            f"Short setup (A) requires rejection at {short_anchor_lbl}; long setup (B) requires "
-            f"confirmed bounce from {_fmt_price(sup1)}. Both need BTC direction first."
+            f"Short (A) enters at {short_anchor_lbl}; long (B) needs confirmed bounce from {_fmt_price(sup1)}. "
+            f"BTC direction is the deciding factor."
         )
-        watch_a   = f"ETH bounces to {short_anchor_lbl} and rejects with BTC failing {_fmt_price(btc_sup)}"
+        watch_a   = f"ETH at {short_anchor_lbl} with rejection candle and BTC failing {_fmt_price(btc_sup)}"
         watch_b   = f"ETH bounces {_fmt_price(sup1)} with strong 4h close above"
 
     dir_a = "LONG" if is_long else "SHORT"
