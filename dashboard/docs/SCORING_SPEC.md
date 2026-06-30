@@ -2,15 +2,17 @@
 **Dashboard: ETH Pre-Trade Analysis Engine**
 **Instrument: ETH/USDT Perpetual — HTX Exchange — 5× Leverage**
 **Hold target: 4–12 hours**
-**Version: 2.0 — Weighted Tier System**
+**Version: 2.1 — Weighted Tier System (21 Sections)**
 
 ---
 
 ## 1. Purpose and Scope
 
-This document defines the complete signal scoring framework used by the `/analysis` command. It covers every data source, scoring threshold, tier weight, and the confidence formula.
+This document defines the complete signal scoring framework used by the `/analysis` Telegram command. It covers every data source, scoring threshold, tier weight, and the confidence formula.
 
-The system scores 18 signal sections using live market data fetched from 15+ external APIs. Each section produces a raw score from −1.0 to +1.0 in 0.5 steps. A tier multiplier is applied before summation. The result is a weighted net score that drives direction (LONG/SHORT) and confidence (40–90%).
+The system scores 21 signal sections (§1 context, §2–§19 active, §20–§21 placeholders) using live market data fetched from 40+ external APIs. Each scored section produces a raw score from −1.0 to +1.0 in 0.5 steps. A tier multiplier is applied before summation. The result is a weighted net score that drives direction (LONG/SHORT) and confidence (40–90%).
+
+**Delivery:** All output reaches the trader via Telegram bot. No frontend UI. Zero LLM calls — scoring is deterministic Python. `_source: deterministic-rules-v2`
 
 **This is a decision-support framework, not an autonomous trading system.** All trade entries, sizing, and exits remain at the discretion of the trader.
 
@@ -31,7 +33,7 @@ The system scores 18 signal sections using live market data fetched from 15+ ext
 
 ## 3. Four-Tier Architecture
 
-All 17 actively-scored sections (§2–§18; §1 is context only) fall into one of four tiers. The tier multiplier is applied to the raw section score before adding to the net score.
+Sections §2–§19 are actively scored (18 sections). §1 is context-only (weight 0). §20–§21 are placeholders (weight 0, always N/A). Each active section falls into one of four tiers. The tier multiplier is applied to the raw section score before adding to the net score.
 
 ### CRITICAL — Multiplier ×2.0
 
