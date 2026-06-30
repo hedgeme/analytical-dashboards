@@ -23,14 +23,19 @@ COINGECKO_KEY    = os.getenv("COINGECKO_API_KEY", "")
 ETHERSCAN_KEY    = os.getenv("ETHERSCAN_API_KEY", "")
 SOSOVALUE_KEY    = os.getenv("SOSOVALUE_API_KEY", "")
 CRYPTOQUANT_KEY  = os.getenv("CRYPTOQUANT_API_KEY", "")
+CMC_KEY          = os.getenv("CMC_API_KEY", "")
 
 CG_BASE  = "https://api.coingecko.com/api/v3"
 CDC_BASE = "https://api.crypto.com/exchange/v1/public"
 CQ_BASE  = "https://api.cryptoquant.com/v1"
+CMC_BASE = "https://pro-api.coinmarketcap.com"
 
-CG_HEADERS = {"x-cg-demo-api-key": COINGECKO_KEY} if COINGECKO_KEY else {}
-CQ_HEADERS = {"Authorization": f"Bearer {CRYPTOQUANT_KEY}"} if CRYPTOQUANT_KEY else {}
-UA_HEADERS = {"User-Agent": "Mozilla/5.0 (ETH-Dashboard/1.0)"}
+CG_HEADERS  = {"x-cg-demo-api-key": COINGECKO_KEY} if COINGECKO_KEY else {}
+CQ_HEADERS  = {"Authorization": f"Bearer {CRYPTOQUANT_KEY}"} if CRYPTOQUANT_KEY else {}
+CMC_HEADERS = {"X-CMC_PRO_API_KEY": CMC_KEY, "Accept": "application/json"} if CMC_KEY else {}
+UA_HEADERS  = {"User-Agent": "Mozilla/5.0 (ETH-Dashboard/1.0)"}
+
+HTX_BASE = "https://api.hbdm.com"
 
 TIMEOUT = aiohttp.ClientTimeout(total=15)
 
@@ -227,19 +232,17 @@ async def fetch_long_short_ratio(s):
                      params={"instId": "ETH-USDT-SWAP", "period": "1H"})
 
 
+SOSO_BASE    = "https://openapi.sosovalue.com/openapi/v1"
+SOSO_HEADERS = {"x-soso-api-key": SOSOVALUE_KEY, **UA_HEADERS} if SOSOVALUE_KEY else {}
+
 async def fetch_sosovalue_etf(s):
-    """ETH + BTC spot ETF flows from SoSoValue. Graceful degradation if key absent."""
+    """ETH spot ETF aggregate daily/weekly/monthly net flows from SoSoValue.
+    Returns summary-history with 3 rows per date (daily, weekly, monthly windows)."""
     if not SOSOVALUE_KEY:
         return None
-    try:
-        eth = await get(s, "https://sosovalue.com/api/etf/us-eth-spot/daily-net-inflow",
-                        headers={"apiKey": SOSOVALUE_KEY})
-        btc = await get(s, "https://sosovalue.com/api/etf/us-btc-spot/daily-net-inflow",
-                        headers={"apiKey": SOSOVALUE_KEY})
-        return {"eth": eth, "btc": btc}
-    except Exception as e:
-        print(f"[data] sosovalue: {e}")
-        return None
+    return await get(s, f"{SOSO_BASE}/etfs/summary-history",
+                     params={"symbol": "ETH", "country_code": "US", "limit": "3"},
+                     headers=SOSO_HEADERS)
 
 
 async def fetch_eth_supply(s):
@@ -257,6 +260,140 @@ async def fetch_btc_history_30d(s):
                      params={"vs_currency": "usd", "days": "30", "interval": "daily"})
 
 
+# ── CoinMarketCap API (Free/Basic tier) ───────────────────────────────────────
+
+async def fetch_cmc_fng(s):
+    """CMC Fear & Greed Index — current value + 7-day history. More authoritative than alternative.me."""
+    if not CMC_KEY:
+        return None
+    latest = await get(s, f"{CMC_BASE}/v3/fear-and-greed/latest", headers=CMC_HEADERS)
+    hist   = await get(s, f"{CMC_BASE}/v3/fear-and-greed/historical",
+                       headers=CMC_HEADERS, params={"limit": "7"})
+    return {"latest": latest, "historical": hist}
+
+
+async def fetch_cmc_global(s):
+    """CMC global metrics: market cap, BTC/ETH dominance, DeFi vol, stablecoin cap, derivatives vol."""
+    if not CMC_KEY:
+        return None
+    return await get(s, f"{CMC_BASE}/v1/global-metrics/quotes/latest", headers=CMC_HEADERS)
+
+
+async def fetch_cmc_quotes(s):
+    """CMC ETH+BTC quotes with CEX/DEX volume split and percent changes across all timeframes."""
+    if not CMC_KEY:
+        return None
+    return await get(s, f"{CMC_BASE}/v1/cryptocurrency/quotes/latest",
+                     headers=CMC_HEADERS, params={"symbol": "ETH,BTC", "convert": "USD"})
+
+
+# ── HTX USDT-M Linear Swap (public, no key) ───────────────────────────────────
+
+async def fetch_htx_funding(s):
+    """ETH-USDT USDT-M perpetual funding rate from HTX (v1 — v3 does not exist)."""
+    return await get(s, f"{HTX_BASE}/linear-swap-api/v1/swap_funding_rate",
+                     params={"contract_code": "ETH-USDT"})
+
+async def fetch_htx_oi(s):
+    """Current open interest for ETH-USDT linear swap (USDT-denominated)."""
+    return await get(s, f"{HTX_BASE}/linear-swap-api/v1/swap_open_interest",
+                     params={"contract_code": "ETH-USDT"})
+
+async def fetch_htx_ls(s):
+    """Elite account long/short ratio for ETH-USDT linear swap."""
+    return await get(s, f"{HTX_BASE}/linear-swap-api/v1/swap_elite_account_ratio",
+                     params={"contract_code": "ETH-USDT", "period": "5min"})
+
+async def fetch_htx_oi_history(s):
+    """25 hourly OI snapshots in USDT — used for 24h OI trend calculation."""
+    return await get(s, f"{HTX_BASE}/linear-swap-api/v1/swap_his_open_interest",
+                     params={"contract_code": "ETH-USDT", "period": "60min",
+                             "size": "25", "amount_type": "1"})
+
+async def fetch_htx_liquidations(s):
+    """Last 24h ETH-USDT liquidation orders from HTX (2 pages = up to 100 orders)."""
+    p1, p2 = await asyncio.gather(
+        safe(get(s, f"{HTX_BASE}/linear-swap-api/v1/swap_liquidation_orders",
+                 params={"contract_code": "ETH-USDT", "trade_type": "0",
+                         "create_date": "1", "page_index": "1", "page_size": "50"})),
+        safe(get(s, f"{HTX_BASE}/linear-swap-api/v1/swap_liquidation_orders",
+                 params={"contract_code": "ETH-USDT", "trade_type": "0",
+                         "create_date": "1", "page_index": "2", "page_size": "50"})),
+    )
+    orders = []
+    for page in (p1, p2):
+        orders.extend((_safe_get(page, "data", "orders") or []))
+    return orders
+
+async def fetch_okx_liquidations(s):
+    """OKX ETH-USDT-SWAP filled liquidation orders (most recent 100)."""
+    return await get(s, f"{OKX_BASE}/public/liquidation-orders",
+                     params={"instType": "SWAP", "uly": "ETH-USDT",
+                             "state": "filled", "limit": "100"})
+
+
+# ── Beacon chain staking delta (public RPC + Etherscan) ───────────────────────
+ETH_PUBLIC_RPC    = "https://eth.drpc.org"
+DEPOSIT_CONTRACT  = "0x00000000219ab540356cBB839Cbe05303d7705Fa"
+DEPOSIT_TOPIC     = "0x649bbc62d0e31342afea4e5cd82d4049e7e1ee912fc0889aa790803be39038c5"
+RPC_HEADERS       = {**UA_HEADERS, "Content-Type": "application/json"}
+
+async def _rpc(s, method, params=None):
+    payload = {"jsonrpc": "2.0", "method": method, "params": params or [], "id": 1}
+    async with s.post(ETH_PUBLIC_RPC, json=payload, headers=RPC_HEADERS, timeout=TIMEOUT) as r:
+        d = await r.json(content_type=None)
+        return d.get("result")
+
+async def fetch_beacon_deposits_24h(s):
+    """Count ETH2 DepositEvent logs in the last ~7200 blocks (24h). Each event = 32 ETH staked."""
+    if not ETHERSCAN_KEY:
+        return None
+    curr = await _rpc(s, "eth_blockNumber")
+    if not curr:
+        return None
+    from_block = int(curr, 16) - 7200
+    p1, p2 = await asyncio.gather(
+        safe(get(s, "https://api.etherscan.io/v2/api", params={
+            "chainid": "1", "module": "logs", "action": "getLogs",
+            "address": DEPOSIT_CONTRACT, "fromBlock": str(from_block), "toBlock": "latest",
+            "topic0": DEPOSIT_TOPIC, "page": "1", "offset": "1000", "apikey": ETHERSCAN_KEY,
+        })),
+        safe(get(s, "https://api.etherscan.io/v2/api", params={
+            "chainid": "1", "module": "logs", "action": "getLogs",
+            "address": DEPOSIT_CONTRACT, "fromBlock": str(from_block), "toBlock": "latest",
+            "topic0": DEPOSIT_TOPIC, "page": "2", "offset": "1000", "apikey": ETHERSCAN_KEY,
+        })),
+    )
+    count = len((p1 or {}).get("result") or []) + len((p2 or {}).get("result") or [])
+    return {"deposits_24h": count, "eth_staked_24h": count * 32}
+
+async def fetch_beacon_withdrawal_sample(s):
+    """Sample 6 blocks spread over 24h via public ETH RPC to estimate daily withdrawal rate."""
+    curr = await _rpc(s, "eth_blockNumber")
+    if not curr:
+        return None
+    curr_num = int(curr, 16)
+    sample_blocks = [curr_num - i * 1200 for i in range(6)]  # one sample every 4h
+
+    async def _block_withdrawals(blk_num):
+        result = await _rpc(s, "eth_getBlockByNumber", [hex(blk_num), False])
+        if not isinstance(result, dict):
+            return None
+        ws = result.get("withdrawals", [])
+        return sum(int(w["amount"], 16) / 1e9 for w in ws)
+
+    samples = await asyncio.gather(*[safe(_block_withdrawals(b)) for b in sample_blocks])
+    valid = [v for v in samples if v is not None]
+    if not valid:
+        return None
+    avg = sum(valid) / len(valid)
+    return {
+        "avg_eth_per_block": round(avg, 4),
+        "eth_unstaked_24h_est": round(avg * 7200),
+        "sample_count": len(valid),
+    }
+
+
 # ─── parallel orchestration ───────────────────────────────────────────────────
 
 async def fetch_all_data() -> Dict:
@@ -270,11 +407,13 @@ async def fetch_all_data() -> Dict:
             fng, eth_fng,
             gas, eth_supply,
             lido, lst,
-            reddit_eth, reddit_cc,
             cq_flows, cq_funding, cq_oi, cq_ls, cq_liq,
             etf, btc_30d,
             usm_burn, usm_gauge, usm_supply, usm_scarcity,
             cex_flows, tv_etfs,
+            cmc_fng, cmc_global, cmc_quotes,
+            htx_funding, htx_oi, htx_ls, htx_oi_hist, htx_liqs, okx_liqs,
+            beacon_deps, beacon_ws,
         ) = await asyncio.gather(
             safe(fetch_eth_coingecko(s)),
             safe(fetch_btc_coingecko(s)),
@@ -291,14 +430,12 @@ async def fetch_all_data() -> Dict:
             safe(fetch_eth_supply(s)),
             safe(fetch_defillama_lido(s)),
             safe(fetch_defillama_lst(s)),
-            safe(fetch_reddit(s, "ethereum")),
-            safe(fetch_reddit(s, "CryptoCurrency")),
-            safe(fetch_cq(s, "/eth/exchange-flows/inflow")),   # requires Professional — returns None on Basic
+            safe(fetch_cq(s, "/eth/exchange-flows/inflow")),   # requires CryptoQuant Professional
             safe(fetch_funding_rate(s)),
             safe(fetch_open_interest(s)),
             safe(fetch_long_short_ratio(s)),
-            safe(fetch_cq(s, "/eth/derivatives/liquidation")), # requires Professional — returns None on Basic
-            safe(fetch_sosovalue_etf(s)),                      # Cloudflare-blocked from server — returns None
+            safe(fetch_cq(s, "/eth/derivatives/liquidation")), # requires CryptoQuant Professional
+            safe(fetch_sosovalue_etf(s)),                      # SoSoValue openapi.sosovalue.com
             safe(fetch_btc_history_30d(s)),
             safe(fetch_usm_burn_rates(s)),
             safe(fetch_usm_gauge_rates(s)),
@@ -306,6 +443,17 @@ async def fetch_all_data() -> Dict:
             safe(fetch_usm_scarcity(s)),
             safe(fetch_defillama_cexs(s)),
             safe(fetch_tv_etfs(s)),
+            safe(fetch_cmc_fng(s)),
+            safe(fetch_cmc_global(s)),
+            safe(fetch_cmc_quotes(s)),
+            safe(fetch_htx_funding(s)),
+            safe(fetch_htx_oi(s)),
+            safe(fetch_htx_ls(s)),
+            safe(fetch_htx_oi_history(s)),
+            safe(fetch_htx_liquidations(s)),
+            safe(fetch_okx_liquidations(s)),
+            safe(fetch_beacon_deposits_24h(s)),
+            safe(fetch_beacon_withdrawal_sample(s)),
         )
 
     # ── parse 1D candles for technicals ──────────────────────────────────────
@@ -324,18 +472,12 @@ async def fetch_all_data() -> Dict:
     cg_200d_prices = _parse_cg_prices(eth_200d)
     cg_7d_prices   = _parse_cg_prices(eth_7d)
 
-    # ── parse Reddit sentiment ────────────────────────────────────────────────
-    reddit_summary = _parse_reddit(reddit_eth, reddit_cc)
-
     # ── parse F&G ────────────────────────────────────────────────────────────
     fng_latest  = _safe_get(fng,     "data", 0, "value")
     fng_7d      = [d.get("value") for d in (_safe_get(fng, "data") or [])]
     eth_fng_val = _safe_get(eth_fng, "value")
 
     # ── parse OKX derivatives ─────────────────────────────────────────────────
-    # cq_funding → OKX funding-rate:  {"data": [{"fundingRate": "-0.000029"}]}
-    # cq_oi      → OKX open-interest: {"data": [{"oi": "7464177", "oiUsd": "1173741988"}]}
-    # cq_ls      → OKX LS ratio:      {"data": [["timestamp", "2.941"]]}
     okx_funding = None
     okx_oi_usd  = None
     okx_ls      = None
@@ -349,21 +491,28 @@ async def fetch_all_data() -> Dict:
         okx_ls = float(cq_ls["data"][0][1]) if cq_ls else None
     except Exception: pass
 
-    cq_data = {
-        "exchange_inflow":    _cq_last(cq_flows, "inflow_mean"),  # None on CryptoQuant Basic
-        "funding_rate":       round(okx_funding, 4) if okx_funding is not None else None,
-        "open_interest_usd":  round(okx_oi_usd, 0) if okx_oi_usd is not None else None,
-        "long_short_ratio":   round(okx_ls, 3) if okx_ls is not None else None,
-        "liquidations_long":  _cq_last(cq_liq, "liquidations_long"),
-        "liquidations_short": _cq_last(cq_liq, "liquidations_short"),
-        "source": "OKX (funding/OI/LS)",
-    }
+    # ── parse HTX derivatives ─────────────────────────────────────────────────
+    htx_der  = _parse_htx_derivatives(htx_funding, htx_oi, htx_ls, htx_oi_hist)
+
+    # ── parse combined liquidations (OKX + HTX) ───────────────────────────────
+    liq_data = _parse_liquidations(htx_liqs, okx_liqs)
 
     # ── parse §10 supply/burn (Etherscan ethsupply2) ─────────────────────────
     supply_data = _parse_supply(eth_supply)
 
-    # ── parse §11 staking (DefiLlama) ─────────────────────────────────────────
+    # ── parse §11 staking (DefiLlama + beacon chain) ─────────────────────────
     staking = _parse_staking(lido, lst)
+
+    # ── parse 24h staking delta (Etherscan deposits + drpc.org withdrawals) ───
+    staked_24h   = (beacon_deps or {}).get("eth_staked_24h")
+    deposits_24h = (beacon_deps or {}).get("deposits_24h")
+    unstaked_24h = (beacon_ws  or {}).get("eth_unstaked_24h_est")
+    net_stake_24h = (round(staked_24h - unstaked_24h)
+                     if staked_24h is not None and unstaked_24h is not None else None)
+    staking["staked_24h_eth"]      = staked_24h
+    staking["validators_entered_24h"] = deposits_24h
+    staking["unstaked_24h_eth_est"] = unstaked_24h
+    staking["net_stake_change_24h"] = net_stake_24h
 
     # ── parse §10 ultrasound.money supply/burn ────────────────────────────────
     usm_data = _parse_usm(usm_burn, usm_gauge, usm_supply, usm_scarcity)
@@ -371,8 +520,12 @@ async def fetch_all_data() -> Dict:
     # ── parse §16 exchange flows (DefiLlama CEX) ──────────────────────────────
     cex_data = _parse_cex_flows(cex_flows)
 
-    # ── parse §8 ETF data (TradingView scanner) ────────────────────────────────
-    etf_tv = _parse_tv_etfs(tv_etfs)
+    # ── parse §6 ETF flows (SoSoValue — real daily net inflows) ─────────────────
+    soso_etf = _parse_soso_etf(etf)         # `etf` variable = fetch_sosovalue_etf result
+    etf_tv   = _parse_tv_etfs(tv_etfs)      # TradingView volume proxy (kept as supplement)
+
+    # ── parse CMC data ─────────────────────────────────────────────────────────
+    cmc_data = _parse_cmc(cmc_fng, cmc_global, cmc_quotes)
 
     # ── parse §18 BTC/ETH correlation ─────────────────────────────────────────
     btc_30d_prices = _parse_cg_prices(btc_30d)
@@ -388,24 +541,45 @@ async def fetch_all_data() -> Dict:
             beta_30d = _beta_calc(eth_rets[-n:], btc_rets[-n:])
 
     # ── assemble payload ──────────────────────────────────────────────────────
+    # CMC quotes supplement CoinGecko with CEX/DEX volume split and multi-timeframe % changes
+    cmc_eth = cmc_data.get("eth", {})
+    cmc_btc = cmc_data.get("btc", {})
+
     return {
         "timestamp": int(time.time()),
         "eth": {
-            "price":       _safe_get(eth_cg,  "market_data", "current_price", "usd"),
-            "price_24h_high": _safe_get(eth_cg, "market_data", "high_24h", "usd"),
-            "price_24h_low":  _safe_get(eth_cg, "market_data", "low_24h",  "usd"),
-            "change_24h":  _safe_get(eth_cg,  "market_data", "price_change_percentage_24h"),
-            "volume_24h":  _safe_get(eth_cg,  "market_data", "total_volume", "usd"),
-            "market_cap":  _safe_get(eth_cg,  "market_data", "market_cap",   "usd"),
-            "cdc_last":    _safe_get(eth_cdc, "result", "data", "a"),  # ask price
+            "price":          _safe_get(eth_cg,  "market_data", "current_price", "usd"),
+            "price_24h_high": _safe_get(eth_cg,  "market_data", "high_24h", "usd"),
+            "price_24h_low":  _safe_get(eth_cg,  "market_data", "low_24h",  "usd"),
+            "change_24h":     _safe_get(eth_cg,  "market_data", "price_change_percentage_24h"),
+            "change_7d":      cmc_eth.get("change_7d"),
+            "change_30d":     cmc_eth.get("change_30d"),
+            "volume_24h":     _safe_get(eth_cg,  "market_data", "total_volume", "usd"),
+            "cex_volume_24h": cmc_eth.get("cex_volume_24h"),
+            "dex_volume_24h": cmc_eth.get("dex_volume_24h"),
+            "market_cap":     _safe_get(eth_cg,  "market_data", "market_cap", "usd"),
+            "cdc_last":       _safe_get(eth_cdc, "result", "data", "a"),
         },
         "btc": {
-            "price":         _safe_get(btc_cg,  "market_data", "current_price", "usd"),
-            "change_24h":    _safe_get(btc_cg,  "market_data", "price_change_percentage_24h"),
-            "dominance":     _safe_get(global_cg, "data", "market_cap_percentage", "btc"),
-            "cdc_last":      _safe_get(btc_cdc, "result", "data", "a"),
+            "price":           _safe_get(btc_cg,  "market_data", "current_price", "usd"),
+            "change_24h":      _safe_get(btc_cg,  "market_data", "price_change_percentage_24h"),
+            "change_7d":       cmc_btc.get("change_7d"),
+            "change_30d":      cmc_btc.get("change_30d"),
+            "dominance":       cmc_data.get("btc_dominance") or _safe_get(global_cg, "data", "market_cap_percentage", "btc"),
+            "cdc_last":        _safe_get(btc_cdc, "result", "data", "a"),
             "correlation_30d": corr_30d,
-            "beta_30d":      beta_30d,
+            "beta_30d":        beta_30d,
+        },
+        "market": {
+            "total_market_cap_usd":    cmc_data.get("total_market_cap_usd"),
+            "total_volume_24h_usd":    cmc_data.get("total_volume_24h_usd"),
+            "btc_dominance":           cmc_data.get("btc_dominance"),
+            "eth_dominance":           cmc_data.get("eth_dominance"),
+            "defi_volume_24h_usd":     cmc_data.get("defi_volume_24h_usd"),
+            "stablecoin_market_cap":   cmc_data.get("stablecoin_market_cap"),
+            "derivatives_volume_24h":  cmc_data.get("derivatives_volume_24h"),
+            "active_cryptocurrencies": cmc_data.get("active_cryptocurrencies"),
+            "source": "CoinMarketCap",
         },
         "weekly_range": {
             "high": max((p for p in cg_7d_prices), default=None),
@@ -413,9 +587,11 @@ async def fetch_all_data() -> Dict:
             "avg":  (sum(cg_7d_prices) / len(cg_7d_prices)) if cg_7d_prices else None,
         },
         "fear_greed": {
-            "value":          int(fng_latest) if fng_latest else None,
-            "classification": _safe_get(fng, "data", 0, "value_classification"),
-            "7d_trend":       fng_7d,
+            # CMC F&G is primary; alternative.me is fallback
+            "value":          cmc_data.get("fng_value") or (int(fng_latest) if fng_latest else None),
+            "classification": cmc_data.get("fng_classification") or _safe_get(fng, "data", 0, "value_classification"),
+            "7d_trend":       cmc_data.get("fng_7d_trend") or fng_7d,
+            "source":         "CoinMarketCap" if cmc_data.get("fng_value") else "alternative.me",
         },
         "eth_fear_greed": {
             "value": int(eth_fng_val) if eth_fng_val is not None else None,
@@ -431,10 +607,17 @@ async def fetch_all_data() -> Dict:
         },
         "supply": {**supply_data, **usm_data},
         "staking": staking,
-        "derivatives": cq_data,
-        "etf_flows": etf_tv,
+        "derivatives": {
+            "okx": {
+                "funding_rate":      round(okx_funding, 4) if okx_funding is not None else None,
+                "open_interest_usd": round(okx_oi_usd, 0)  if okx_oi_usd  is not None else None,
+                "long_short_ratio":  round(okx_ls, 3)       if okx_ls       is not None else None,
+            },
+            "htx": htx_der,
+            "liquidations": liq_data,
+        },
+        "etf_flows": {**soso_etf, "tv_proxy": etf_tv},
         "exchange_flows": cex_data,
-        "reddit": reddit_summary,
         "candles_1d": candles_1d[-100:],  # last 100 for chart
         "candles_4h": candles_4h[-100:],
         "prices_200d": cg_200d_prices,    # for MA overlay
@@ -499,6 +682,35 @@ def _parse_reddit(eth_raw, cc_raw) -> dict:
         "bear_pct":      round(bear_count / total * 100, 1),
         "top_titles":    [p["title"] for p in posts[:5]],
     }
+
+
+def _parse_soso_etf(raw) -> dict:
+    """Parse SoSoValue ETH ETF summary-history.
+    The API returns 3 rows per date: smallest |net_inflow| = daily, next = weekly, largest = monthly."""
+    try:
+        entries = (raw or {}).get("data") or []
+        if not entries:
+            return {}
+        latest_date = entries[0]["date"]
+        day_rows = [e for e in entries if e["date"] == latest_date]
+        # Sort ascending by absolute value so daily < weekly < monthly
+        day_rows = sorted(day_rows, key=lambda e: abs(e.get("total_net_inflow") or 0))
+        daily   = day_rows[0] if len(day_rows) > 0 else {}
+        weekly  = day_rows[1] if len(day_rows) > 1 else {}
+        monthly = day_rows[2] if len(day_rows) > 2 else {}
+        return {
+            "source":               "SoSoValue",
+            "date":                 latest_date,
+            "daily_net_inflow_usd":   daily.get("total_net_inflow"),
+            "weekly_net_inflow_usd":  weekly.get("total_net_inflow"),
+            "monthly_net_inflow_usd": monthly.get("total_net_inflow"),
+            "total_aum_usd":          daily.get("total_net_assets"),
+            "cum_net_inflow_usd":     daily.get("cum_net_inflow"),
+            "total_volume_usd":       daily.get("total_value_traded"),
+        }
+    except Exception as e:
+        print(f"[data] soso etf parse: {e}")
+        return {}
 
 
 def _parse_tv_etfs(raw) -> dict:
@@ -568,9 +780,177 @@ def _parse_tv_etfs(raw) -> dict:
         return {"source": "TradingView", "error": str(e)}
 
 
+def _parse_htx_derivatives(funding_raw, oi_raw, ls_raw, oi_hist_raw) -> dict:
+    """Parse HTX USDT-M ETH-USDT linear swap derivatives into clean fields."""
+    result = {}
+    try:
+        d = (funding_raw or {}).get("data", {})
+        if isinstance(d, list):
+            d = d[0] if d else {}
+        fr = d.get("funding_rate")
+        if fr is not None:
+            result["funding_rate"] = round(float(fr) * 100, 4)
+    except Exception as e:
+        print(f"[data] htx funding: {e}")
+
+    try:
+        oi_list = (oi_raw or {}).get("data") or []
+        if oi_list:
+            val = oi_list[0].get("value")
+            if val is not None:
+                result["open_interest_usd"] = float(val)
+    except Exception as e:
+        print(f"[data] htx oi: {e}")
+
+    try:
+        ls_list = ((ls_raw or {}).get("data") or {}).get("list") or []
+        if ls_list:
+            buy  = float(ls_list[0].get("buy_ratio",  0) or 0)
+            sell = float(ls_list[0].get("sell_ratio", 0) or 0)
+            if sell > 0:
+                result["long_short_ratio"] = round(buy / sell, 3)
+    except Exception as e:
+        print(f"[data] htx ls: {e}")
+
+    try:
+        ticks = (oi_hist_raw or {}).get("data", {}).get("tick") or []
+        if len(ticks) >= 2:
+            ticks_sorted = sorted(ticks, key=lambda x: x.get("ts", 0))
+            oi_vals = [float(t["volume"]) for t in ticks_sorted if t.get("volume")]
+            if len(oi_vals) >= 2:
+                first, last = oi_vals[0], oi_vals[-1]
+                pct = round((last - first) / first * 100, 2) if first != 0 else 0.0
+                result["oi_24h_change_pct"] = pct
+                result["oi_trend"] = "rising" if pct > 2 else "falling" if pct < -2 else "flat"
+                result["oi_6h_snap_b"] = [round(v / 1e9, 2) for v in oi_vals[-7:]]
+    except Exception as e:
+        print(f"[data] htx oi_hist: {e}")
+
+    return result
+
+
+def _parse_liquidations(htx_liqs_raw, okx_liqs_raw) -> dict:
+    """Aggregate raw liquidation orders from HTX + OKX into time-bucketed USD totals."""
+    now_ms = time.time() * 1000
+    cutoffs = {
+        "1h":  now_ms - 3_600_000,
+        "4h":  now_ms - 14_400_000,
+        "12h": now_ms - 43_200_000,
+        "24h": now_ms - 86_400_000,
+    }
+    long_usd  = {k: 0.0 for k in cutoffs}
+    short_usd = {k: 0.0 for k in cutoffs}
+
+    # HTX: direction="sell" = long was closed (liquidated long)
+    #       direction="buy"  = short was closed (liquidated short)
+    for order in (htx_liqs_raw or []):
+        try:
+            ts  = float(order.get("created_at", 0))
+            px  = float(order.get("price",  0) or 0)
+            vol = float(order.get("volume", 0) or 0)
+            usd = vol * px  # contracts × price (ETH-USDT: 1 contract ≈ 0.01 ETH, directional signal is correct)
+            bucket = long_usd if order.get("direction") == "sell" else short_usd
+            for period, cutoff in cutoffs.items():
+                if ts >= cutoff:
+                    bucket[period] += usd
+        except Exception:
+            pass
+
+    # OKX: data[].details[]; side="sell" = long liquidated, side="buy" = short liquidated
+    for item in ((okx_liqs_raw or {}).get("data") or []):
+        for detail in (item.get("details") or []):
+            try:
+                ts   = float(detail.get("ts",   0) or 0)
+                sz   = float(detail.get("sz",   0) or 0)
+                bkpx = float(detail.get("bkPx", 0) or 0)
+                usd  = sz * bkpx  # OKX ETH-USDT-SWAP: 1 contract = 1 ETH
+                bucket = long_usd if detail.get("side") == "sell" else short_usd
+                for period, cutoff in cutoffs.items():
+                    if ts >= cutoff:
+                        bucket[period] += usd
+            except Exception:
+                pass
+
+    result = {}
+    for period in cutoffs:
+        l, s = long_usd[period], short_usd[period]
+        if l > 0 or s > 0:
+            total = l + s
+            result[period] = {
+                "long_usd_m":  round(l / 1e6, 2),
+                "short_usd_m": round(s / 1e6, 2),
+                "total_usd_m": round(total / 1e6, 2),
+                "bias": ("long_heavy" if l > s * 1.5
+                         else "short_heavy" if s > l * 1.5
+                         else "balanced"),
+            }
+    return result
+
+
+def _parse_cmc(fng_raw, global_raw, quotes_raw) -> dict:
+    """Parse CoinMarketCap Free-tier responses into dashboard-ready fields."""
+    result = {}
+
+    # Fear & Greed (primary)
+    try:
+        latest = (fng_raw or {}).get("latest", {}).get("data", {})
+        if isinstance(latest, list):
+            latest = latest[0] if latest else {}
+        result["fng_value"]          = int(latest["value"]) if latest.get("value") else None
+        result["fng_classification"] = latest.get("value_classification")
+        # CMC historical F&G — try both known response shapes
+        hist_raw  = (fng_raw or {}).get("historical", {})
+        hist_data = (hist_raw.get("data") or {})
+        if isinstance(hist_data, list):
+            entries = hist_data
+        elif isinstance(hist_data, dict):
+            entries = hist_data.get("data_list") or []
+        else:
+            entries = []
+        result["fng_7d_trend"] = [int(d["value"]) for d in entries if d.get("value")]
+    except Exception as e:
+        print(f"[data] cmc fng parse: {e}")
+
+    # Global metrics
+    try:
+        q = (global_raw or {}).get("data", {}).get("quote", {}).get("USD", {})
+        d = (global_raw or {}).get("data", {})
+        result["total_market_cap_usd"]   = q.get("total_market_cap")
+        result["total_volume_24h_usd"]   = q.get("total_volume_24h")
+        result["btc_dominance"]          = d.get("btc_dominance")
+        result["eth_dominance"]          = d.get("eth_dominance")
+        result["active_cryptocurrencies"] = d.get("active_cryptocurrencies")
+        result["defi_volume_24h_usd"]    = q.get("defi_volume_24h")
+        result["stablecoin_market_cap"]  = q.get("stablecoin_market_cap")
+        result["derivatives_volume_24h"] = q.get("derivatives_volume_24h")
+    except Exception as e:
+        print(f"[data] cmc global parse: {e}")
+
+    # ETH + BTC quotes (CEX/DEX volume split, multi-timeframe changes)
+    try:
+        coins = (quotes_raw or {}).get("data", {})
+        for symbol, key in [("ETH", "eth"), ("BTC", "btc")]:
+            coin_list = coins.get(symbol)
+            coin = coin_list[0] if isinstance(coin_list, list) else coin_list
+            if not coin:
+                continue
+            q = coin.get("quote", {}).get("USD", {})
+            result[key] = {
+                "change_7d":      q.get("percent_change_7d"),
+                "change_30d":     q.get("percent_change_30d"),
+                "cex_volume_24h": q.get("cex_volume_24h"),
+                "dex_volume_24h": q.get("dex_volume_24h"),
+            }
+    except Exception as e:
+        print(f"[data] cmc quotes parse: {e}")
+
+    return result
+
+
 def _parse_cex_flows(raw) -> dict:
     """Parse DefiLlama CEX flows. Negative inflow = net outflow = accumulation (bullish)."""
-    MAJOR = {"Binance", "OKX", "Coinbase", "Bybit", "Kraken", "Bitfinex", "HTX", "KuCoin"}
+    MAJOR = {"Binance", "OKX", "HTX", "Bybit", "Kraken", "Bitfinex", "KuCoin"}
+    # Coinbase excluded — no public on-chain flow API
     try:
         cexs = (raw or {}).get("cexs", [])
         major = [x for x in cexs if x.get("name") in MAJOR]
@@ -633,7 +1013,13 @@ def _parse_usm(burn_raw, gauge_raw, supply_raw, scarcity_raw) -> dict:
         issuance = d1_gauge.get("issuance_rate_yearly", {}).get("eth")
         burn      = d1_gauge.get("burn_rate_yearly", {}).get("eth")
         if issuance and burn:
-            result["net_daily_eth"] = round((burn - issuance) / 365, 2)  # positive = deflationary
+            issuance_day = float(issuance) / 365
+            burn_day_yr  = float(burn) / 365
+            result["issuance_eth_per_day"] = round(issuance_day, 2)
+            # net_daily_eth > 0 means burn > issuance = supply decreasing = deflationary
+            result["net_daily_eth"]        = round(burn_day_yr - issuance_day, 2)
+            # supply_change_24h: negative = supply shrinking (deflationary)
+            result["supply_change_24h"]    = round(issuance_day - burn_day_yr, 2)
     except Exception:
         pass
 
@@ -770,10 +1156,37 @@ def _safe_get(obj, *keys):
     return obj
 
 
-# ─── 5-minute TTL cache ───────────────────────────────────────────────────────
+# ─── 5-minute TTL cache (file-backed so restarts don't cold-start) ────────────
 
-_data_cache: dict = {}
+import json as _json
+
+_CACHE_FILE    = "/tmp/eth-dashboard-data.json"
 DATA_CACHE_TTL = 5 * 60  # seconds
+
+
+def _load_disk_cache() -> dict:
+    try:
+        with open(_CACHE_FILE) as f:
+            d = _json.load(f)
+        if time.time() - d.get("ts", 0) < DATA_CACHE_TTL:
+            print("[data] loaded cache from disk")
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+def _save_disk_cache(ts: float, data: dict) -> None:
+    try:
+        tmp = _CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            _json.dump({"ts": ts, "data": data}, f)
+        os.replace(tmp, _CACHE_FILE)
+    except Exception as e:
+        print(f"[data] cache write error: {e}")
+
+
+_data_cache: dict = _load_disk_cache()
 
 
 # ─── Flask route ──────────────────────────────────────────────────────────────
@@ -787,4 +1200,5 @@ def get_data():
     result = asyncio.run(fetch_all_data())
     _data_cache["ts"]   = now
     _data_cache["data"] = result
+    _save_disk_cache(now, result)
     return jsonify(result)

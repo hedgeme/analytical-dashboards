@@ -27,9 +27,27 @@ def health():
     return jsonify({"status": "ok", "version": "1.0"})
 
 
+_BOT_PIDFILE = "/tmp/eth-dashboard-bot.pid"
+
+
+def _kill_stale_bot():
+    """On startup, kill any bot left over from a previous app.py so this instance owns it."""
+    import signal
+    try:
+        old_pid = int(open(_BOT_PIDFILE).read().strip())
+        os.kill(old_pid, signal.SIGKILL)
+        print(f"[telegram] killed stale bot (pid {old_pid})", flush=True)
+    except Exception:
+        pass
+    try:
+        os.remove(_BOT_PIDFILE)
+    except Exception:
+        pass
+
+
 def _bot_supervisor():
-    """Run telegram_bot.py as a subprocess with auto-restart on crash.
-    Backs off if the bot exits too quickly (e.g. PID lock collision)."""
+    """Run telegram_bot.py as a subprocess with auto-restart on crash."""
+    _kill_stale_bot()
     script = str(pathlib.Path(__file__).parent / "telegram_bot.py")
     while True:
         print("[telegram] starting bot process…", flush=True)
@@ -38,9 +56,9 @@ def _bot_supervisor():
         code = proc.wait()
         elapsed = time.time() - t_start
         if elapsed < 3:
-            # Exited almost immediately — likely PID lock: another instance is running.
-            print(f"[telegram] bot exited in {elapsed:.1f}s — another instance may be running; waiting 30s", flush=True)
-            time.sleep(30)
+            print(f"[telegram] bot exited in {elapsed:.1f}s — killing stale lock and retrying…", flush=True)
+            _kill_stale_bot()
+            time.sleep(3)
         else:
             print(f"[telegram] bot exited (code {code}), restarting in 10s…", flush=True)
             time.sleep(10)
