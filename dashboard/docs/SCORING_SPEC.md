@@ -571,9 +571,14 @@ The value string contains the actual data used for scoring — prices, rates, pe
 
 ### Options A / B / C
 
-- **Option A:** Primary direction. Entry zone anchored to the nearest support (for LONG) or resistance (for SHORT) identified by the swing algorithm.
-- **Option B:** Contrarian. Low confidence. Only valid on a specific price trigger stated in `entry_condition`.
+- **Option A:** Primary direction. Entry zone is RSI-conditional to ensure entries are actionable near current price:
+  - **SHORT:** RSI < 30 → wait for EMA20 bounce (too oversold to short safely); RSI 30–45 → 1–2% bounce from spot; RSI > 45 → near market now
+  - **LONG:** RSI > 65 → wait for EMA20 pullback (too overbought to long safely); RSI 45–65 → 1–2% dip from spot; RSI < 45 → near market now
+  - Stop is anchored to the nearest overhead EMA (for SHORT) or nearest below EMA (for LONG), not to a distant S/R level.
+- **Option B:** Contrarian. Low confidence. Anchored to the nearest S/R level (S1 for contrarian LONG, R1 for contrarian SHORT). Only valid on a specific price trigger stated in `entry_condition`.
 - **Option C:** Wait. Always valid when confidence < 55% or when a flag contradicts the direction.
+
+**Design rationale:** Entry zones are designed for a 3-trades/day workflow on 5× leverage. An entry anchored to a resistance level 10%+ above spot means the trade may never execute. The RSI-conditional logic ensures Option A is always reachable within the trading session while protecting against the two highest-risk scenarios: shorting into extreme oversold conditions (RSI < 30) and longing into extreme overbought conditions (RSI > 65).
 
 **Ranked:** A/B/C are sorted by confidence. If Option C ranks first, the system is explicitly recommending no trade until a trigger fires.
 
@@ -586,6 +591,7 @@ The value string contains the actual data used for scoring — prices, rates, pe
 | 1.0 | Jun 2026 | Initial build — equal weight, Anthropic LLM scoring |
 | 2.0 | Jun 2026 | Deterministic rule-based scoring; four-tier weight system; §9 Gas replaced by Price vs EMA Stack; §18 BTC elevated to Critical and made bidirectional; §3/§4 F&G moved to Low tier; §2 enhanced with EMA structure; §7 elevated to High |
 | 2.1 | Jun 2026 | §3/§4 F&G gradient scoring (20-45=+0.25, 55-75=−0.25 mild tiers); §13 L/S ratio made context-dependent (L/S>1.5 scores +0.5 only when RSI<50); §18 BTC bullish trigger updated from +3% to +5% (reduce noise); §19 ETH/BTC Cross Ratio added (STANDARD ×1.0, 24h+7d alpha); §20 Options IV and §21 Volatility Regime added as PLACEHOLDER sections; confidence denominator updated from 19.0 to 20.0; _source tag updated to deterministic-rules-v2 |
+| 2.2 | Jun 2026 | Entry zones made RSI-conditional: SHORT RSI<30 waits for EMA20 bounce, RSI 30–45 uses 1–2% bounce from spot, RSI>45 enters near market; LONG symmetric (RSI>65 waits for EMA20 pullback, RSI 45–65 minor dip, RSI<45 near market). Stop anchored to nearest overhead/below EMA instead of distant S/R level. Ensures Option A entries are always reachable within the trading session for 3-trades/day workflow. |
 
 ---
 
