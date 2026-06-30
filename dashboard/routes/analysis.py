@@ -702,6 +702,9 @@ def _build_options(data, news, scores_dict, weighted_net) -> dict:
     btc_sup = round(btc_price * 0.97)
     btc_res = round(btc_price * 1.03)
 
+    ema20 = _g(data, "technicals", "ema20")
+    ema50 = _g(data, "technicals", "ema50")
+
     is_long = weighted_net >= 0
     conf_a  = min(90, max(40, int(50 + (abs(weighted_net) / _MAX_WEIGHTED) * 40)))
     conf_b  = max(15, min(60, int(50 - (abs(weighted_net) / _MAX_WEIGHTED) * 40)))
@@ -719,15 +722,32 @@ def _build_options(data, news, scores_dict, weighted_net) -> dict:
         return "; ".join(f"{k} ({v['value'][:60]})" for k, v in sections[:n])
 
     if is_long:
-        entry_a   = [round(sup1 * 1.002), round(sup1 * 1.012)]
+        pct_to_s1 = (price - sup1) / price if price > 0 else 1.0
+        if pct_to_s1 <= 0.05:
+            # Price near support — standard dip-to-support long entry
+            long_anchor     = sup1
+            long_anchor_lbl = f"{_fmt_price(sup1)} support"
+            entry_a         = [round(sup1 * 1.002), round(sup1 * 1.012)]
+            stop_a          = round(sup1 * 0.96)
+            cond_a          = f"ETH holds above {_fmt_price(sup1)} AND BTC reclaims {_fmt_price(btc_sup)}"
+        else:
+            # Price far above support — anchor entry to nearest EMA below or current zone
+            if ema20 and price > ema20:
+                long_anchor     = round(ema20)
+                long_anchor_lbl = f"EMA20 {_fmt_price(long_anchor)} pullback"
+            else:
+                long_anchor     = round(price * 0.985)
+                long_anchor_lbl = f"current zone {_fmt_price(long_anchor)}"
+            entry_a = [round(long_anchor * 0.995), round(long_anchor * 1.005)]
+            stop_a  = round(long_anchor * 0.96)
+            cond_a  = f"ETH pulls back to {long_anchor_lbl} and holds AND BTC reclaims {_fmt_price(btc_sup)}"
+
         target1_a = round(res1)
         target2_a = round(res2)
-        stop_a    = round(sup1 * 0.96)
         manual_a  = round(sum(entry_a) / 2 * 1.07)
-        cond_a    = f"ETH holds above {_fmt_price(sup1)} AND BTC reclaims {_fmt_price(btc_sup)}"
         thesis_a  = (
             f"Weighted net {weighted_net:+.1f} — bullish bias driven by {_driver_text(bull_sections)}. "
-            f"Entry targets {_fmt_price(sup1)} support with {_fmt_price(res1)} as first objective. "
+            f"Entry at {long_anchor_lbl} with {_fmt_price(res1)} as first objective. "
             f"BTC {_fmt_price(btc_price)} must hold {_fmt_price(btc_sup)} for confirmation."
         )
         risks_a   = [
@@ -752,22 +772,42 @@ def _build_options(data, news, scores_dict, weighted_net) -> dict:
             f"Weighted net is positive ({weighted_net:+.1f}) — primary bias opposes this trade",
         ]
         reason_c  = (
-            f"Long setup (A) requires ETH to hold {_fmt_price(sup1)}; short setup (B) requires "
+            f"Long setup (A) requires ETH to pull back to {long_anchor_lbl} and hold; short setup (B) requires "
             f"rejection at {_fmt_price(res1)}. Both entries need BTC confirmation."
         )
-        watch_a   = f"ETH closes 4h candle above {_fmt_price(sup1)} with volume expansion"
+        watch_a   = f"ETH pulls back to {long_anchor_lbl} with 4h candle close above and volume expansion"
         watch_b   = f"ETH wick rejection at {_fmt_price(res1)} on elevated volume"
 
     else:
-        entry_a   = [round(res1 * 0.99), round(res1 * 1.005)]
+        pct_to_r1 = (res1 - price) / price if price > 0 else 1.0
+        if pct_to_r1 <= 0.05:
+            # Price near resistance — standard resistance-fade short entry
+            short_anchor     = res1
+            short_anchor_lbl = f"{_fmt_price(res1)} resistance"
+            entry_a          = [round(res1 * 0.99), round(res1 * 1.005)]
+            stop_a           = round(res1 * 1.04)
+            cond_a           = f"ETH fails to hold {_fmt_price(res1)} resistance AND BTC loses {_fmt_price(btc_sup)}"
+        else:
+            # Price already well below R1 — anchor entry to nearest overhead EMA
+            if ema20 and ema20 > price:
+                short_anchor     = round(ema20)
+                short_anchor_lbl = f"EMA20 {_fmt_price(short_anchor)} retest"
+            elif ema50 and ema50 > price:
+                short_anchor     = round(ema50)
+                short_anchor_lbl = f"EMA50 {_fmt_price(short_anchor)} retest"
+            else:
+                short_anchor     = round(price * 1.015)
+                short_anchor_lbl = f"current zone {_fmt_price(short_anchor)}"
+            entry_a = [round(short_anchor * 0.99), round(short_anchor * 1.005)]
+            stop_a  = round(short_anchor * 1.04)
+            cond_a  = f"ETH bounces to {short_anchor_lbl} and rejects AND BTC loses {_fmt_price(btc_sup)}"
+
         target1_a = round(sup1)
         target2_a = round(sup2)
-        stop_a    = round(res1 * 1.04)
         manual_a  = round(sum(entry_a) / 2 * 0.95)
-        cond_a    = f"ETH fails to hold {_fmt_price(res1)} resistance AND BTC loses {_fmt_price(btc_sup)}"
         thesis_a  = (
             f"Weighted net {weighted_net:+.1f} — bearish bias driven by {_driver_text(bear_sections)}. "
-            f"Short entry near {_fmt_price(res1)} resistance targeting {_fmt_price(sup1)}. "
+            f"Short entry at {short_anchor_lbl} targeting {_fmt_price(sup1)}. "
             f"BTC {_fmt_price(btc_price)} losing {_fmt_price(btc_sup)} is primary catalyst."
         )
         risks_a   = [
@@ -791,10 +831,10 @@ def _build_options(data, news, scores_dict, weighted_net) -> dict:
             f"Weighted net is negative ({weighted_net:+.1f}) — primary bias opposes this trade",
         ]
         reason_c  = (
-            f"Short setup (A) requires rejection at {_fmt_price(res1)}; long setup (B) requires "
+            f"Short setup (A) requires rejection at {short_anchor_lbl}; long setup (B) requires "
             f"confirmed bounce from {_fmt_price(sup1)}. Both need BTC direction first."
         )
-        watch_a   = f"ETH 4h close below {_fmt_price(res1)} with BTC failing {_fmt_price(btc_sup)}"
+        watch_a   = f"ETH bounces to {short_anchor_lbl} and rejects with BTC failing {_fmt_price(btc_sup)}"
         watch_b   = f"ETH bounces {_fmt_price(sup1)} with strong 4h close above"
 
     dir_a = "LONG" if is_long else "SHORT"
